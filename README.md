@@ -3,9 +3,28 @@
 
 This is the source code accompanying the NeurIPS'24 spotlight [***HaloScope: Harnessing Unlabeled LLM Generations for Hallucination Detection***](https://arxiv.org/abs/2409.17504) by Xuefeng Du, Chaowei Xiao, and Yixuan Li
 
+## Additional notes
+
+I recently got some emails on the inconsistent results on TydiQA dataset. Here is my notice to you all!
+
+Thank you for the email! I did not know for sure what was happening. I have cleaned the code quite extensively from what I ran before the submission so there might be some pieces that are not proper in the current code. Since the code can produce very different results across different dataset splits and machines, so I suggest you tuning the following things in the code (from most important to least ones):
+
+- Check the generated answers to see whether they contain repetitions or unnecessary stuff and filter them. 
+- In line 572 (https://github.com/deeplearning-wisc/haloscope/blob/4045fc23c568c2c7598124c6dca1dd021c7a447e/hal_det_llama.py#L572), you can also choose what is the maximal principal components you want to use to test on validation set, it is quite sensitive tbh.
+- The threshold and the metric for getting the gt labels (rather than 0.5).
+- The location to extract the embeddings.
+- Whether to use weighted scores.
+- Finally, the number of validation samples in the code.
+
+Thank you for the patience! Please also feel free to report the average results across multiple runs in your new experiments! We appreciate your additional efforts and interest in our work.
+
+Authors
+
+
 ## Ads 
 
 Checkout our ICML'23 work [SCONE](https://proceedings.mlr.press/v202/bai23a/bai23a.pdf), ICLR'24 work [SAL](https://openreview.net/forum?id=jlEjB8MVGa) and a recent [preprint](https://arxiv.org/abs/2410.00296v1) on leveraging unlabeled data for OOD detection and VLM harmful prompt detection and if you are interested!
+
 
 
 ## Requirements
