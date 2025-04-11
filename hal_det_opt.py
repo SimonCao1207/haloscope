@@ -617,6 +617,8 @@ def main():
         thresholds = np.linspace(0,1, num=40)[1:-1]
         normalizer = lambda x: x / (np.linalg.norm(x, ord=2, axis=-1, keepdims=True) + 1e-10)
         auroc_over_thres = []
+        best_layer_over_thres = []
+        from linear_probe import get_linear_acc
         for thres_wild in thresholds:
             best_auroc = 0
             for layer in range(len(embed_generated_wild[0])):
@@ -633,7 +635,6 @@ def main():
                 # embed_train = embed_generated_wild[:,layer,:]
                 # label_train = gt_label_wild
                 ## gt training, saplma
-                from linear_probe import get_linear_acc
 
 
 
@@ -655,7 +656,7 @@ def main():
 
                 clf.eval()
                 output = clf(torch.from_numpy(
-                    embed_generated_test[:, layer, :]).cuda())
+                    embed_generated_eval[:, layer, :]).cuda())
                 pca_wild_score_binary_cls = torch.sigmoid(output)
 
 
@@ -663,8 +664,8 @@ def main():
 
                 if np.isnan(pca_wild_score_binary_cls).sum() > 0:
                     breakpoint()
-                measures = get_measures(pca_wild_score_binary_cls[gt_label_test == 1],
-                                        pca_wild_score_binary_cls[gt_label_test == 0], plot=False)
+                measures = get_measures(pca_wild_score_binary_cls[gt_label_val == 1],
+                                        pca_wild_score_binary_cls[gt_label_val == 0], plot=False)
 
                 if measures[0] > best_auroc:
                     best_auroc = measures[0]
@@ -672,7 +673,46 @@ def main():
                     best_layer = layer
 
             auroc_over_thres.append(best_auroc)
+            best_layer_over_thres.append(best_layer)
             print('thres: ', thres_wild, 'best result: ', best_result, 'best_layer: ', best_layer)
+        argmax_index = max(range(len(auroc_over_thres)), key=auroc_over_thres.__getitem__)
+        print("the best threshold calculated on the eval set is: ", thresholds[argmax_index], "best layer is: ", best_layer_over_thres[argmax_index])
+
+        # get the result on the test set
+        thres_wild_score = np.sort(best_scores)[int(len(best_scores) * thresholds[argmax_index])]
+        true_wild = embed_generated_wild[:, best_layer_over_thres[argmax_index], :][best_scores > thres_wild_score]
+        false_wild = embed_generated_wild[:, best_layer_over_thres[argmax_index], :][best_scores <= thres_wild_score]
+
+        embed_train = np.concatenate([true_wild, false_wild], 0)
+        label_train = np.concatenate([np.ones(len(true_wild)),
+                                      np.zeros(len(false_wild))], 0)
+
+
+
+        best_acc, final_acc, (
+            clf, best_state, best_preds, preds, labels_val), losses_train = get_linear_acc(
+            embed_train,
+            label_train,
+            embed_train,
+            label_train,
+            2, epochs=50,
+            print_ret=True,
+            batch_size=512,
+            cosine=True,
+            nonlinear=True,
+            learning_rate=0.05,
+            weight_decay=0.0003)
+
+        clf.eval()
+        output = clf(torch.from_numpy(
+            embed_generated_test[:, best_layer_over_thres[argmax_index], :]).cuda())
+        pca_wild_score_binary_cls = torch.sigmoid(output)
+        pca_wild_score_binary_cls = pca_wild_score_binary_cls.cpu().data.numpy()
+        if np.isnan(pca_wild_score_binary_cls).sum() > 0:
+            breakpoint()
+        measures = get_measures(pca_wild_score_binary_cls[gt_label_test == 1],
+                                pca_wild_score_binary_cls[gt_label_test == 0], plot=False)
+        print('test AUROC: ', measures[0])
 
 
 
