@@ -3,8 +3,7 @@
 
 This is the source code accompanying the NeurIPS'24 spotlight [***HaloScope: Harnessing Unlabeled LLM Generations for Hallucination Detection***](https://arxiv.org/abs/2409.17504) by Xuefeng Du, Chaowei Xiao, and Yixuan Li
 
-## Additional notes
-Note that this work can be sensitive to random seeds (It is set to 41 for all the experiments in our paper), which determines how the unlabeled/evaluation/test LLM generations are splitted and prepared. We recommend reporting average results across different random seeds in your experiments.
+
 
 
 ## Ads 
@@ -93,3 +92,5 @@ If you found any part of this code is useful in your research, please consider c
       year = {2024}
 }
 ```
+## Additional notes
+Note that this work can be sensitive to random seeds (It is set to 41 for all the experiments in our paper), which determines how the unlabeled/evaluation/test LLM generations are splitted and prepared. We recommend reporting average results across different random seeds in your experiments.
