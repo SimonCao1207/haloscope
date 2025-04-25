@@ -14,7 +14,9 @@ Checkout our ICML'23 work [SCONE](https://proceedings.mlr.press/v202/bai23a/bai2
 
 ## Requirements
 ```
-pip install -r requirements.txt
+uv venv --python=3.10
+source .venv/bin/activate
+uv pip install -r requirements.txt
 ```
 
 ## Models Preparation
