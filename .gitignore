@@ -35,3 +35,4 @@ MANIFEST
 models/
 save_for_eval/
 .vscode/
+*.npy

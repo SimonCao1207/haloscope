@@ -1,27 +1,21 @@
+import argparse
 import os
-import torch
-import torch.nn.functional as F
+
 import evaluate
-from datasets import load_metric
+import numpy as np
+import torch
+from baukit import TraceDict
 from datasets import load_dataset
 from tqdm import tqdm
-import numpy as np
-import pickle
-from utils import get_llama_activations_bau, tokenized_tqa, tokenized_tqa_gen, tokenized_tqa_gen_end_q
-import llama_iti
-import pickle
-import argparse
-import matplotlib.pyplot as plt
-from pprint import pprint
-from baukit import Trace, TraceDict
-from metric_utils import get_measures, print_measures
-import re
-from torch.autograd import Variable
 
+import llama_iti
+from metric_utils import get_measures, print_measures
 
 
 def seed_everything(seed: int):
-    import random, os
+    import os
+    import random
+
     import numpy as np
     import torch
 
@@ -41,6 +35,7 @@ HF_NAMES = {
     'llama2_chat_7B': 'models/Llama-2-7b-chat-hf',
     'llama2_chat_13B': 'models/Llama-2-13b-chat-hf',
     'llama2_chat_70B': 'meta-llama/Llama-2-70b-chat-hf',
+    'llama3-1-8B-instruct' : 'models/Llama-3.1-8B-Instruct',
 }
 
 
@@ -89,15 +84,16 @@ def main():
                 used_indices.append(i)
     elif args.dataset_name == 'coqa':
         import json
+
         import pandas as pd
         from datasets import Dataset
 
         def _save_dataset():
             # https://github.com/lorenzkuhn/semantic_uncertainty/blob/main/code/parse_coqa.py
-            save_path = f'./coqa_dataset'
+            save_path = './coqa_dataset'
             if not os.path.exists(save_path):
                 # https://downloads.cs.stanford.edu/nlp/data/coqa/coqa-dev-v1.0.json
-                with open(f'./coqa-dev-v1.0.json', 'r') as infile:
+                with open('./coqa-dev-v1.0.json', 'r') as infile:
                     data = json.load(infile)['data']
 
                 dataset = {}
@@ -238,7 +234,7 @@ def main():
             np.save(f'./save_for_eval/{args.dataset_name}_hal_det/answers/' + info + f'hal_det_{args.model_name}_{args.dataset_name}_answers_index_{i}.npy',
                     answers)
     elif args.generate_gt:
-        from bleurt_pytorch import BleurtConfig, BleurtForSequenceClassification, BleurtTokenizer
+        from bleurt_pytorch import BleurtForSequenceClassification, BleurtTokenizer
 
         model = BleurtForSequenceClassification.from_pretrained('./models/BLEURT-20').cuda()
         tokenizer = BleurtTokenizer.from_pretrained('./models/BLEURT-20')
