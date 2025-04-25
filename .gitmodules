@@ -1,0 +1,3 @@
+[submodule "TruthfulQA"]
+	path = TruthfulQA
+	url = https://github.com/sylinrl/TruthfulQA.git
