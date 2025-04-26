@@ -255,11 +255,6 @@ def save_scores(args, gts):
     file_path = f'./{prefix}_{args.dataset_name}_{metric}_score.npy'
     np.save(file_path, gts)
 
-def load_generated_answers(args, i):
-    prefix = "most_likely" if args.most_likely else "batch_generations"
-    file_path = f'./save_for_eval/{args.dataset_name}_hal_det/answers/{prefix}_hal_det_{args.model_name}_{args.dataset_name}_answers_index_{i}.npy'
-    return np.load(file_path)
-
 def get_correct_answers(dataset, i, dataset_name, used_indices=None):
     """Retrieve all correct answers based on the dataset type."""
     if dataset_name == 'tqa':
@@ -273,6 +268,17 @@ def get_correct_answers(dataset, i, dataset_name, used_indices=None):
     elif dataset_name == 'tydiqa':
         all_answers = dataset[int(used_indices[i])]['answers']['text']
     return all_answers
+
+def save_generated_answers(dataset_name, model_name, answers, i, most_likely):
+    """Save generated answers to a file."""
+    info = 'most_likely_' if most_likely else 'batch_generations_'
+    file_path = f'./save_for_eval/{dataset_name}_hal_det/answers/{info}hal_det_{model_name}_{dataset_name}_answers_index_{i}.npy'
+    np.save(file_path, answers)
+
+def load_generated_answers(args, i):
+    prefix = "most_likely" if args.most_likely else "batch_generations"
+    file_path = f'./save_for_eval/{args.dataset_name}_hal_det/answers/{prefix}_hal_det_{args.model_name}_{args.dataset_name}_answers_index_{i}.npy'
+    return np.load(file_path)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -307,9 +313,7 @@ def main():
             input_ids = tokenizer(prompt_text, return_tensors='pt').input_ids.cuda()
             answers = generate_answers(model, tokenizer, args.dataset_name,input_ids, args.num_gene, args.most_likely)
 
-            info = 'most_likely_' if args.most_likely else 'batch_generations_'
-            np.save(f'./save_for_eval/{args.dataset_name}_hal_det/answers/' + info + f'hal_det_{args.model_name}_{args.dataset_name}_answers_index_{i}.npy',
-                    answers)
+            save_generated_answers(args.dataset_name, args.model_name, answers, i, args.most_likely)
     elif args.generate_gt:
         model.eval()
         gts = np.zeros(0)
@@ -324,19 +328,15 @@ def main():
 
         save_scores(args, gts)
     else:
-        # firstly get the embeddings of the generated question and answers.
+        # Get the embeddings of the generated question and answers.
         embed_generated = []
 
         for i in tqdm(range(length)):
-            if args.dataset_name == 'tydiqa':
-                question = dataset[int(used_indices[i])]['question']
-            else:
-                question = dataset[i]['question']
-            answers = np.load(
-                f'save_for_eval/{args.dataset_name}_hal_det/answers/most_likely_hal_det_{args.model_name}_{args.dataset_name}_answers_index_{i}.npy')
+            answers = load_generated_answers(args, i)
 
             for anw in answers:
                 prompt_text = generate_prompt(dataset, i, args.dataset_name, used_indices)
+                prompt_text += f" {anw}"
                 input_ids = tokenizer(prompt_text, return_tensors='pt').input_ids.cuda()
 
                 with torch.no_grad():
@@ -352,16 +352,10 @@ def main():
         mlp_layer_embeddings = []
         attention_head_embeddings = []
         for i in tqdm(range(length)):
-            if args.dataset_name == 'tydiqa':
-                question = dataset[int(used_indices[i])]['question']
-            else:
-                question = dataset[i]['question']
-
-
-            answers = np.load(
-                f'save_for_eval/{args.dataset_name}_hal_det/answers/most_likely_hal_det_{args.model_name}_{args.dataset_name}_answers_index_{i}.npy')
+            answers = load_generated_answers(args, i)
             for anw in answers:
                 prompt_text = generate_prompt(dataset, i, args.dataset_name, used_indices)
+                prompt_text += f" {anw}"
                 input_ids = tokenizer(prompt_text, return_tensors='pt').input_ids.cuda()
 
                 with torch.no_grad():
@@ -381,31 +375,14 @@ def main():
         np.save(f'save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_embeddings_mlp_wise.npy',  mlp_layer_embeddings)
 
 
+        # Get the split and label (true or false) of the unlabeled data and the test data.
+        score_type = 'rouge' if args.use_rouge else 'bleurt'
+        prefix = 'ml' if args.most_likely else 'bg'
+        score_file = f'./{prefix}_{args.dataset_name}_{score_type}_score.npy'
 
-        # get the split and label (true or false) of the unlabeled data and the test data.
-        if args.use_rouge:
-            if args.most_likely:
-                gts = np.load(f'./ml_{args.dataset_name}_rouge_score.npy')
-            else:
-                gts_bg = np.load(f'./bg_{args.dataset_name}_rouge_score.npy')
-        else:
-            if args.most_likely:
-                gts = np.load(f'./ml_{args.dataset_name}_bleurt_score.npy')
-            else:
-                gts_bg = np.load(f'./bg_{args.dataset_name}_bleurt_score.npy')
-
+        scores = np.load(score_file)
         thres = args.thres_gt
-
-        if args.most_likely:
-            gt_label = np.asarray(gts> thres, dtype=np.int32)
-        else:
-            gt_label_bg = np.asarray(gts_bg > thres, dtype=np.int32)
-
-
-        if args.dataset_name == 'tydiqa':
-            length = len(used_indices)
-        else:
-            length = len(dataset)
+        gt_label = np.asarray(scores > thres, dtype=np.int32) 
 
         (
             gt_label_test,
@@ -433,11 +410,6 @@ def main():
             feat_indices_wild = []
             feat_indices_eval = []
 
-            if args.dataset_name == 'tydiqa':
-                length = len(used_indices)
-            else:
-                length = len(dataset)
-
             for i in range(length):
                 if i in wild_q_indices_train:
                     feat_indices_wild.extend(np.arange(i, i + 1).tolist())
@@ -464,8 +436,6 @@ def main():
         scores = np.mean(np.matmul(embed_generated_wild[:,returned_results['best_layer'],:], projection), -1, keepdims=True)
         assert scores.shape[1] == 1
         best_scores = np.sqrt(np.sum(np.square(scores), axis=1)) * returned_results['best_sign']
-
-
 
         # direct projection
         feat_indices_test = []
