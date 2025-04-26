@@ -7,6 +7,7 @@ import pandas as pd
 from datasets import Dataset, load_dataset
 
 import llama_iti
+from data.wmqa import WikiMultiHopQA
 
 HF_NAMES = {
     "llama_7B": "baffo32/decapoda-research-llama-7B-hf",
@@ -46,6 +47,10 @@ def load_dataset_by_name(args):
     elif args.dataset_name == "coqa":
         model = HF_NAMES[args.model_name] if not args.model_dir else args.model_dir
         dataset = load_coqa_dataset(model)
+        return dataset, None
+    elif args.dataset_name == "2wikimultihopqa":
+        path = "/data/namcao/dynamic_rag/2wikimultihopqa"
+        dataset = WikiMultiHopQA(path)
         return dataset, None
     else:
         raise ValueError("Invalid dataset name")
@@ -149,3 +154,4 @@ if __name__ == "__main__":
     dataset, used_indices = load_dataset_by_name(args)
     length = len(dataset) if used_indices is None else len(used_indices)
     print(f"Dataset loaded with {length} samples.")
+    print(f"Sample data {dataset[0]}")
