@@ -209,6 +209,71 @@ def load_model(args):
         ).cuda()
     return model, tokenizer
 
+def compute_rouge_scores(predictions, all_answers):
+    """Compute ROUGE scores for predictions against all answers."""
+    rouge = evaluate.load('rouge')
+    num_answers, num_predictions = len(all_answers), len(predictions)
+    all_results = np.zeros((num_answers, num_predictions))
+    all_results1 = np.zeros((num_answers, num_predictions))
+    all_results2 = np.zeros((num_answers, num_predictions))
+
+    for anw in range(num_answers):
+        results = rouge.compute(
+            predictions=predictions,
+            references=[all_answers[anw]] * num_predictions,
+            use_aggregator=False
+        )
+        all_results[anw] = results['rougeL']
+        all_results1[anw] = results['rouge1']
+        all_results2[anw] = results['rouge2']
+
+    return all_results, all_results1, all_results2
+
+def compute_bleurt_scores(model, tokenizer, predictions, all_answers):
+    """Compute BLEURT scores for predictions against all answers."""
+    num_answers, num_predictions = len(all_answers), len(predictions)
+    all_results = np.zeros((num_answers, num_predictions))
+
+    with torch.no_grad():
+        for anw in range(num_answers):
+            inputs = tokenizer(
+                predictions.tolist(),
+                [all_answers[anw]] * num_predictions,
+                padding='longest',
+                return_tensors='pt'
+            )
+            for key in inputs.keys():
+                inputs[key] = inputs[key].cuda()
+            res = np.asarray(model(**inputs).logits.flatten().tolist())
+            all_results[anw] = res
+
+    return all_results
+
+def save_scores(args, gts):
+    prefix = "ml" if args.most_likely else "bg"
+    metric = "rouge" if args.use_rouge else "bleurt"
+    file_path = f'./{prefix}_{args.dataset_name}_{metric}_score.npy'
+    np.save(file_path, gts)
+
+def load_generated_answers(args, i):
+    prefix = "most_likely" if args.most_likely else "batch_generations"
+    file_path = f'./save_for_eval/{args.dataset_name}_hal_det/answers/{prefix}_hal_det_{args.model_name}_{args.dataset_name}_answers_index_{i}.npy'
+    return np.load(file_path)
+
+def get_correct_answers(dataset, i, dataset_name, used_indices=None):
+    """Retrieve all correct answers based on the dataset type."""
+    if dataset_name == 'tqa':
+        best_answer = dataset[i]['best_answer']
+        correct_answer = dataset[i]['correct_answers']
+        all_answers = [best_answer] + correct_answer
+    elif dataset_name == 'triviaqa':
+        all_answers = dataset[i]['answer']['aliases']
+    elif dataset_name == 'coqa':
+        all_answers = dataset[i]['answer']
+    elif dataset_name == 'tydiqa':
+        all_answers = dataset[int(used_indices[i])]['answers']['text']
+    return all_answers
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_name', type=str, default='llama2_chat_7B')
@@ -231,15 +296,11 @@ def main():
     length = len(used_indices) if used_indices is not None else len(dataset)
 
     if args.gene:
-
         if not os.path.exists(f'./save_for_eval/{args.dataset_name}_hal_det/'):
             os.mkdir(f'./save_for_eval/{args.dataset_name}_hal_det/')
 
         if not os.path.exists(f'./save_for_eval/{args.dataset_name}_hal_det/answers'):
             os.mkdir(f'./save_for_eval/{args.dataset_name}_hal_det/answers')
-
-        period_token_id = [tokenizer(_)['input_ids'][-1] for _ in ['\n']]
-        period_token_id += [tokenizer.eos_token_id]
 
         for i in tqdm(range(0, length), desc="Generating answers"):
             prompt_text = generate_prompt(dataset, i, args.dataset_name, used_indices)
@@ -249,81 +310,19 @@ def main():
             info = 'most_likely_' if args.most_likely else 'batch_generations_'
             np.save(f'./save_for_eval/{args.dataset_name}_hal_det/answers/' + info + f'hal_det_{args.model_name}_{args.dataset_name}_answers_index_{i}.npy',
                     answers)
-
     elif args.generate_gt:
         model.eval()
-
-        rouge = evaluate.load('rouge')
         gts = np.zeros(0)
-        if args.dataset_name == 'tydiqa':
-            length = len(used_indices)
-        else:
-            length = len(dataset)
-        for i in range(length):
-            if args.dataset_name == 'tqa':
-                best_answer = dataset[i]['best_answer']
-                correct_answer = dataset[i]['correct_answers']
-                all_answers = [best_answer] + correct_answer
-            elif args.dataset_name == 'triviaqa':
-                all_answers = dataset[i]['answer']['aliases']
-            elif args.dataset_name == 'coqa':
-                all_answers = dataset[i]['answer']
-            elif args.dataset_name == 'tydiqa':
-                all_answers = dataset[int(used_indices[i])]['answers']['text']
-
-            if args.most_likely:
-                answers = np.load(
-                    f'./save_for_eval/{args.dataset_name}_hal_det/answers/most_likely_hal_det_{args.model_name}_{args.dataset_name}_answers_index_{i}.npy')
-            else:
-                answers = np.load(
-                    f'./save_for_eval/{args.dataset_name}_hal_det/answers/batch_generations_hal_det_{args.model_name}_{args.dataset_name}_answers_index_{i}.npy')
-            # get the gt.
+        for i in tqdm(range(length), desc="Generating ground truth"):
+            all_answers = get_correct_answers(dataset, i, args.dataset_name, used_indices)
+            predictions = load_generated_answers(args, i)
             if args.use_rouge:
-
-                predictions = answers
-                all_results = np.zeros((len(all_answers), len(predictions)))
-                all_results1 = np.zeros((len(all_answers), len(predictions)))
-                all_results2 = np.zeros((len(all_answers), len(predictions)))
-                for anw in range(len(all_answers)):
-                    results = rouge.compute(predictions=predictions,
-                                            references=[all_answers[anw]] * len(predictions),
-                                            use_aggregator=False)
-                    all_results[anw] = results['rougeL']
-                    all_results1[anw] = results['rouge1']
-                    all_results2[anw] = results['rouge2']
-
-                # breakpoint()
-                gts = np.concatenate([gts, np.max(all_results, axis=0)], 0)
-
-                if i % 50 == 0:
-                    print("samples passed: ", i)
+                all_results, _, _ = compute_rouge_scores(predictions, all_answers)
             else:
+                all_results = compute_bleurt_scores(model, tokenizer, predictions, all_answers)
+            gts = np.concatenate([gts, np.max(all_results, axis=0)], 0)
 
-                predictions = answers
-                all_results = np.zeros((len(all_answers), len(predictions)))
-                with torch.no_grad():
-                    for anw in range(len(all_answers)):
-                        inputs = tokenizer(predictions.tolist(), [all_answers[anw]] * len(predictions),
-                                           padding='longest', return_tensors='pt')
-                        for key in list(inputs.keys()):
-                            inputs[key] = inputs[key].cuda()
-                        res = np.asarray(model(**inputs).logits.flatten().tolist())
-                        all_results[anw] = res
-                gts = np.concatenate([gts, np.max(all_results, axis=0)], 0)
-                if i % 10 == 0:
-                    print("samples passed: ", i)
-        # breakpoint()
-        if args.most_likely:
-            if args.use_rouge:
-                np.save(f'./ml_{args.dataset_name}_rouge_score.npy', gts)
-            else:
-                np.save(f'./ml_{args.dataset_name}_bleurt_score.npy', gts)
-        else:
-            if args.use_rouge:
-                np.save(f'./bg_{args.dataset_name}_rouge_score.npy', gts)
-            else:
-                np.save(f'./bg_{args.dataset_name}_bleurt_score.npy', gts)
-
+        save_scores(args, gts)
     else:
         # firstly get the embeddings of the generated question and answers.
         embed_generated = []
