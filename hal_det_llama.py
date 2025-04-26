@@ -5,11 +5,12 @@ import evaluate
 import numpy as np
 import torch
 from baukit import TraceDict
-from datasets import load_dataset
+from sklearn.decomposition import PCA
 from tqdm import tqdm
 
 import llama_iti
 from metric_utils import get_measures, print_measures
+from prepapre_data import load_dataset_by_name
 
 
 def seed_everything(seed: int):
@@ -39,6 +40,127 @@ HF_NAMES = {
 }
 
 
+def split_indices_and_labels(length, wild_ratio, gt_label):
+    permuted_index = np.random.permutation(length)
+    wild_q_indices = permuted_index[:int(wild_ratio * length)]
+    # Exclude validation samples.
+    wild_q_indices1 = wild_q_indices[:len(wild_q_indices) - 100]
+    wild_q_indices2 = wild_q_indices[len(wild_q_indices) - 100:]
+    gt_label_test = []
+    gt_label_wild = []
+    gt_label_val = []
+    for i in range(length):
+        if i not in wild_q_indices:
+            gt_label_test.extend(gt_label[i: i+1])
+        elif i in wild_q_indices1:
+            gt_label_wild.extend(gt_label[i: i+1])
+        else:
+            gt_label_val.extend(gt_label[i: i+1])
+    return (
+        np.asarray(gt_label_test),
+        np.asarray(gt_label_wild),
+        np.asarray(gt_label_val),
+        wild_q_indices,
+        wild_q_indices1,
+        wild_q_indices2
+    )
+
+def svd_embed_score(
+    embed_generated_wild, gt_label, begin_k, k_span, mean=1, svd=1, weight=0
+):
+    embed_generated = embed_generated_wild
+    best_auroc_over_k = 0
+    best_layer_over_k = 0
+    best_scores_over_k = None
+    best_projection_over_k = None
+    for k in tqdm(range(begin_k, k_span)):
+        best_auroc = 0
+        best_layer = 0
+        best_scores = None
+        mean_recorded = None
+        best_projection = None
+        for layer in range(len(embed_generated_wild[0])):
+            if mean:
+                mean_recorded = embed_generated[:, layer, :].mean(0)
+                centered = embed_generated[:, layer, :] - mean_recorded
+            else:
+                centered = embed_generated[:, layer, :]
+
+            if not svd:
+                pca_model = PCA(n_components=k, whiten=False).fit(centered)
+                projection = pca_model.components_.T
+                mean_recorded = pca_model.mean_
+                if weight:
+                    projection = pca_model.singular_values_ * projection
+            else:
+                _, sin_value, V_p = torch.linalg.svd(torch.from_numpy(centered).cuda())
+                projection = V_p[:k, :].T.cpu().data.numpy()
+                if weight:
+                    projection = sin_value[:k] * projection
+
+            scores = np.mean(np.matmul(centered, projection), -1, keepdims=True)
+            assert scores.shape[1] == 1
+            scores = np.sqrt(np.sum(np.square(scores), axis=1))
+
+            # not sure about whether true and false data the direction will point to,
+            # so we test both. similar practices are in the representation engineering paper
+            # https://arxiv.org/abs/2310.01405
+            measures1 = get_measures(
+                scores[gt_label == 1], scores[gt_label == 0], plot=False
+            )
+            measures2 = get_measures(
+                -scores[gt_label == 1], -scores[gt_label == 0], plot=False
+            )
+
+            if measures1[0] > measures2[0]:
+                measures = measures1
+                sign_layer = 1
+            else:
+                measures = measures2
+                sign_layer = -1
+
+            if measures[0] > best_auroc:
+                best_auroc = measures[0]
+                best_result = [100 * measures[2], 100 * measures[0]]
+                best_layer = layer
+                best_scores = sign_layer * scores
+                best_projection = projection
+                best_mean = mean_recorded
+                best_sign = sign_layer
+        print(
+            "k: ",
+            k,
+            "best result: ",
+            best_result,
+            "layer: ",
+            best_layer,
+            "mean: ",
+            mean,
+            "svd: ",
+            svd,
+        )
+
+        if best_auroc > best_auroc_over_k:
+            best_auroc_over_k = best_auroc
+            best_result_over_k = best_result
+            best_layer_over_k = best_layer
+            best_k = k
+            best_sign_over_k = best_sign
+            best_scores_over_k = best_scores
+            best_projection_over_k = best_projection
+            best_mean_over_k = best_mean
+
+        return {
+            "k": best_k,
+            "best_layer": best_layer_over_k,
+            "best_auroc": best_auroc_over_k,
+            "best_result": best_result_over_k,
+            "best_scores": best_scores_over_k,
+            "best_mean": best_mean_over_k,
+            "best_sign": best_sign_over_k,
+            "best_projection": best_projection_over_k,
+        }
+
 def main():
 
 
@@ -59,99 +181,8 @@ def main():
     args = parser.parse_args()
 
     MODEL = HF_NAMES[args.model_name] if not args.model_dir else args.model_dir
-
-
-
-
-    if args.dataset_name == "tqa":
-        dataset = load_dataset("truthful_qa", 'generation')['validation']
-    elif args.dataset_name == 'triviaqa':
-        dataset = load_dataset("trivia_qa", "rc.nocontext", split="validation")
-        id_mem = set()
-
-        def remove_dups(batch):
-            if batch['question_id'][0] in id_mem:
-                return {_: [] for _ in batch.keys()}
-            id_mem.add(batch['question_id'][0])
-            return batch
-
-        dataset = dataset.map(remove_dups, batch_size=1, batched=True, load_from_cache_file=False)
-    elif args.dataset_name == 'tydiqa':
-        dataset = datasets.load_dataset("tydiqa", "secondary_task", split="train")
-        used_indices = []
-        for i in range(len(dataset)):
-            if 'english' in dataset[i]['id']:
-                used_indices.append(i)
-    elif args.dataset_name == 'coqa':
-        import json
-
-        import pandas as pd
-        from datasets import Dataset
-
-        def _save_dataset():
-            # https://github.com/lorenzkuhn/semantic_uncertainty/blob/main/code/parse_coqa.py
-            save_path = './coqa_dataset'
-            if not os.path.exists(save_path):
-                # https://downloads.cs.stanford.edu/nlp/data/coqa/coqa-dev-v1.0.json
-                with open('./coqa-dev-v1.0.json', 'r') as infile:
-                    data = json.load(infile)['data']
-
-                dataset = {}
-
-                dataset['story'] = []
-                dataset['question'] = []
-                dataset['answer'] = []
-                dataset['additional_answers'] = []
-                dataset['id'] = []
-
-                for sample_id, sample in enumerate(data):
-                    story = sample['story']
-                    questions = sample['questions']
-                    answers = sample['answers']
-                    additional_answers = sample['additional_answers']
-                    for question_index, question in enumerate(questions):
-                        dataset['story'].append(story)
-                        dataset['question'].append(question['input_text'])
-                        dataset['answer'].append({
-                            'text': answers[question_index]['input_text'],
-                            'answer_start': answers[question_index]['span_start']
-                        })
-                        dataset['id'].append(sample['id'] + '_' + str(question_index))
-                        additional_answers_list = []
-
-                        for i in range(3):
-                            additional_answers_list.append(additional_answers[str(i)][question_index]['input_text'])
-
-                        dataset['additional_answers'].append(additional_answers_list)
-                        story = story + ' Q: ' + question['input_text'] + ' A: ' + answers[question_index]['input_text']
-                        if not story[-1] == '.':
-                            story = story + '.'
-
-                dataset_df = pd.DataFrame.from_dict(dataset)
-
-                dataset = Dataset.from_pandas(dataset_df)
-
-                dataset.save_to_disk(save_path)
-            return save_path
-
-        # dataset = datasets.load_from_disk(_save_dataset())
-        def get_dataset(tokenizer, split='validation'):
-            # from https://github.com/lorenzkuhn/semantic_uncertainty/blob/main/code/parse_coqa.py
-            dataset = datasets.load_from_disk(_save_dataset())
-            id_to_question_mapping = dict(zip(dataset['id'], dataset['question']))
-
-            def encode_coqa(example):
-                example['answer'] = [example['answer']['text']] + example['additional_answers']
-                example['prompt'] = prompt = example['story'] + ' Q: ' + example['question'] + ' A:'
-                return tokenizer(prompt, truncation=False, padding=False)
-
-            dataset = dataset.map(encode_coqa, batched=False, load_from_cache_file=False)
-            dataset.set_format(type='torch', columns=['input_ids', 'attention_mask'], output_all_columns=True)
-            return dataset
-
-        dataset = get_dataset(llama_iti.LlamaTokenizer.from_pretrained(MODEL, trust_remote_code=True))
-    else:
-        raise ValueError("Invalid dataset name")
+    dataset, used_indices = load_dataset_by_name(args)
+    length = len(used_indices) if used_indices is not None else len(dataset)
 
     if args.gene:
         tokenizer = llama_iti.LlamaTokenizer.from_pretrained(MODEL, trust_remote_code=True)
@@ -159,14 +190,10 @@ def main():
                                                            device_map="auto").cuda()
 
         begin_index = 0
-        if args.dataset_name == 'tydiqa':
-            end_index = len(used_indices)
-        else:
-            end_index = len(dataset)
+        end_index = length
 
         if not os.path.exists(f'./save_for_eval/{args.dataset_name}_hal_det/'):
             os.mkdir(f'./save_for_eval/{args.dataset_name}_hal_det/')
-
 
         if not os.path.exists(f'./save_for_eval/{args.dataset_name}_hal_det/answers'):
             os.mkdir(f'./save_for_eval/{args.dataset_name}_hal_det/answers')
@@ -176,7 +203,7 @@ def main():
 
         for i in range(begin_index, end_index):
             answers = [None] * args.num_gene
-            if args.dataset_name == 'tydiqa':
+            if args.dataset_name == 'tydiqa' and used_indices is not None:
                 question = dataset[int(used_indices[i])]['question']
                 prompt = tokenizer(
                     "Concisely answer the following question based on the information in the given passage: \n" + \
@@ -316,13 +343,10 @@ def main():
         model = llama_iti.LlamaForCausalLM.from_pretrained(MODEL, low_cpu_mem_usage=True,
                                                            torch_dtype=torch.float16,
                                                            device_map="auto").cuda()
+
         # firstly get the embeddings of the generated question and answers.
         embed_generated = []
 
-        if args.dataset_name == 'tydiqa':
-            length = len(used_indices)
-        else:
-            length = len(dataset)
         for i in tqdm(range(length)):
             if args.dataset_name == 'tydiqa':
                 question = dataset[int(used_indices[i])]['question']
@@ -354,8 +378,8 @@ def main():
 
         HEADS = [f"model.layers.{i}.self_attn.head_out" for i in range(model.config.num_hidden_layers)]
         MLPS = [f"model.layers.{i}.mlp" for i in range(model.config.num_hidden_layers)]
-        embed_generated_loc2 = []
-        embed_generated_loc1 = []
+        mlp_layer_embeddings = []
+        attention_head_embeddings = []
         for i in tqdm(range(length)):
             if args.dataset_name == 'tydiqa':
                 question = dataset[int(used_indices[i])]['question']
@@ -386,26 +410,34 @@ def main():
                     mlp_wise_hidden_states = [ret[mlp].output.squeeze().detach().cpu() for mlp in MLPS]
                     mlp_wise_hidden_states = torch.stack(mlp_wise_hidden_states, dim=0).squeeze().numpy()
 
-                    embed_generated_loc2.append(mlp_wise_hidden_states[:, -1, :])
-                    embed_generated_loc1.append(head_wise_hidden_states[:, -1, :])
-        embed_generated_loc2 = np.asarray(np.stack(embed_generated_loc2), dtype=np.float32)
-        embed_generated_loc1 = np.asarray(np.stack(embed_generated_loc1), dtype=np.float32)
+                    mlp_layer_embeddings.append(mlp_wise_hidden_states[:, -1, :])
+                    attention_head_embeddings.append(head_wise_hidden_states[:, -1, :])
+        mlp_layer_embeddings = np.asarray(np.stack(mlp_layer_embeddings), dtype=np.float32)
+        attention_head_embeddings = np.asarray(np.stack(attention_head_embeddings), dtype=np.float32)
 
-        np.save(f'save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_head_wise.npy', embed_generated_loc1)
-        np.save(f'save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_embeddings_mlp_wise.npy',  embed_generated_loc2)
+        np.save(f'save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_head_wise.npy', attention_head_embeddings)
+        np.save(f'save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_embeddings_mlp_wise.npy',  mlp_layer_embeddings)
 
 
 
         # get the split and label (true or false) of the unlabeled data and the test data.
         if args.use_rouge:
-            gts = np.load(f'./ml_{args.dataset_name}_rouge_score.npy')
-            gts_bg = np.load(f'./bg_{args.dataset_name}_rouge_score.npy')
+            if args.most_likely:
+                gts = np.load(f'./ml_{args.dataset_name}_rouge_score.npy')
+            else:
+                gts_bg = np.load(f'./bg_{args.dataset_name}_rouge_score.npy')
         else:
-            gts = np.load(f'./ml_{args.dataset_name}_bleurt_score.npy')
-            gts_bg = np.load(f'./bg_{args.dataset_name}_bleurt_score.npy')
+            if args.most_likely:
+                gts = np.load(f'./ml_{args.dataset_name}_bleurt_score.npy')
+            else:
+                gts_bg = np.load(f'./bg_{args.dataset_name}_bleurt_score.npy')
+
         thres = args.thres_gt
-        gt_label = np.asarray(gts> thres, dtype=np.int32)
-        gt_label_bg = np.asarray(gts_bg > thres, dtype=np.int32)
+
+        if args.most_likely:
+            gt_label = np.asarray(gts> thres, dtype=np.int32)
+        else:
+            gt_label_bg = np.asarray(gts_bg > thres, dtype=np.int32)
 
 
         if args.dataset_name == 'tydiqa':
@@ -413,116 +445,16 @@ def main():
         else:
             length = len(dataset)
 
+        (
+            gt_label_test,
+            gt_label_wild,
+            gt_label_val,
+            wild_q_indices,
+            wild_q_indices_train,
+            wild_q_indices_val,
+        ) = split_indices_and_labels(length, args.wild_ratio, gt_label)
 
-        permuted_index = np.random.permutation(length)
-        wild_q_indices = permuted_index[:int(args.wild_ratio * length)]
-        # exclude validation samples.
-        wild_q_indices1 = wild_q_indices[:len(wild_q_indices) - 100]
-        wild_q_indices2 = wild_q_indices[len(wild_q_indices) - 100:]
-        gt_label_test = []
-        gt_label_wild = []
-        gt_label_val = []
-        for i in range(length):
-            if i not in wild_q_indices:
-                gt_label_test.extend(gt_label[i: i+1])
-            elif i in wild_q_indices1:
-                gt_label_wild.extend(gt_label[i: i+1])
-            else:
-                gt_label_val.extend(gt_label[i: i+1])
-        gt_label_test = np.asarray(gt_label_test)
-        gt_label_wild = np.asarray(gt_label_wild)
-        gt_label_val = np.asarray(gt_label_val)
-
-
-
-
-        def svd_embed_score(embed_generated_wild, gt_label, begin_k, k_span, mean=1, svd=1, weight=0):
-            embed_generated = embed_generated_wild
-            best_auroc_over_k = 0
-            best_layer_over_k = 0
-            best_scores_over_k = None
-            best_projection_over_k = None
-            for k in tqdm(range(begin_k, k_span)):
-                best_auroc = 0
-                best_layer = 0
-                best_scores = None
-                mean_recorded = None
-                best_projection = None
-                for layer in range(len(embed_generated_wild[0])):
-                    if mean:
-                        mean_recorded = embed_generated[:, layer, :].mean(0)
-                        centered = embed_generated[:, layer, :] - mean_recorded
-                    else:
-                        centered = embed_generated[:, layer, :]
-
-                    if not svd:
-                        pca_model = PCA(n_components=k, whiten=False).fit(centered)
-                        projection = pca_model.components_.T
-                        mean_recorded = pca_model.mean_
-                        if weight:
-                            projection = pca_model.singular_values_ * projection
-                    else:
-                        _, sin_value, V_p = torch.linalg.svd(torch.from_numpy(centered).cuda())
-                        projection = V_p[:k, :].T.cpu().data.numpy()
-                        if weight:
-                            projection = sin_value[:k] * projection
-
-
-                    scores = np.mean(np.matmul(centered, projection), -1, keepdims=True)
-                    assert scores.shape[1] == 1
-                    scores = np.sqrt(np.sum(np.square(scores), axis=1))
-
-                    # not sure about whether true and false data the direction will point to,
-                    # so we test both. similar practices are in the representation engineering paper
-                    # https://arxiv.org/abs/2310.01405
-                    measures1 = get_measures(scores[gt_label == 1],
-                                             scores[gt_label == 0], plot=False)
-                    measures2 = get_measures(-scores[gt_label == 1],
-                                             -scores[gt_label == 0], plot=False)
-
-                    if measures1[0] > measures2[0]:
-                        measures = measures1
-                        sign_layer = 1
-                    else:
-                        measures = measures2
-                        sign_layer = -1
-
-                    if measures[0] > best_auroc:
-                        best_auroc = measures[0]
-                        best_result = [100 * measures[2], 100 * measures[0]]
-                        best_layer = layer
-                        best_scores = sign_layer * scores
-                        best_projection = projection
-                        best_mean = mean_recorded
-                        best_sign = sign_layer
-                print('k: ', k, 'best result: ', best_result, 'layer: ', best_layer,
-                      'mean: ', mean, 'svd: ', svd)
-
-                if best_auroc > best_auroc_over_k:
-                    best_auroc_over_k = best_auroc
-                    best_result_over_k = best_result
-                    best_layer_over_k = best_layer
-                    best_k = k
-                    best_sign_over_k = best_sign
-                    best_scores_over_k = best_scores
-                    best_projection_over_k = best_projection
-                    best_mean_over_k = best_mean
-
-
-            return {'k': best_k,
-                    'best_layer':best_layer_over_k,
-                    'best_auroc':best_auroc_over_k,
-                    'best_result':best_result_over_k,
-                    'best_scores':best_scores_over_k,
-                    'best_mean': best_mean_over_k,
-                    'best_sign':best_sign_over_k,
-                    'best_projection':best_projection_over_k}
-
-
-        from sklearn.decomposition import PCA
         feat_loc = args.feat_loc_svd
-
-
 
         if args.most_likely:
             if feat_loc == 3:
@@ -544,25 +476,21 @@ def main():
             else:
                 length = len(dataset)
 
-
             for i in range(length):
-                if i in wild_q_indices1:
-                    feat_indices_wild.extend(np.arange(i, i+1).tolist())
-                elif i in wild_q_indices2:
+                if i in wild_q_indices_train:
+                    feat_indices_wild.extend(np.arange(i, i + 1).tolist())
+                elif i in wild_q_indices_val:
                     feat_indices_eval.extend(np.arange(i, i + 1).tolist())
             if feat_loc == 3:
-                embed_generated_wild = embed_generated[feat_indices_wild][:,1:,:]
+                embed_generated_wild = embed_generated[feat_indices_wild][:, 1:, :]
                 embed_generated_eval = embed_generated[feat_indices_eval][:, 1:, :]
             else:
                 embed_generated_wild = embed_generated[feat_indices_wild]
                 embed_generated_eval = embed_generated[feat_indices_eval]
 
-
-
-
-
         # returned_results = svd_embed_score(embed_generated_wild, gt_label_wild,
         #                                    1, 11, mean=0, svd=0, weight=args.weighted_svd)
+
         # get the best hyper-parameters on validation set
         returned_results = svd_embed_score(embed_generated_eval, gt_label_val,
                                            1, 11, mean=0, svd=0, weight=args.weighted_svd)
@@ -702,5 +630,4 @@ def main():
 
 
 if __name__ == '__main__':
-    seed_everything(41)
     main()
