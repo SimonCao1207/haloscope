@@ -10,6 +10,7 @@ from sklearn.decomposition import PCA
 from tqdm import tqdm
 
 import llama_iti
+from linear_probe import get_linear_acc
 from metric_utils import get_measures, print_measures
 from prepapre_data import load_dataset_by_name
 
@@ -69,6 +70,13 @@ def split_indices_and_labels(length, wild_ratio, gt_label):
 def svd_embed_score(
     embed_generated_wild, gt_label, begin_k, k_span, mean=1, svd=1, weight=0
 ):
+    """
+    Perform dimensionality reduction using PCA or SVD on embeddings and evaluate their separability.
+
+    This function iterates over a range of dimensions (`k`) and layers of the embeddings to find the 
+    optimal projection that maximizes the AUROC for separating true and false labels.     
+    """
+
     embed_generated = embed_generated_wild
     best_auroc_over_k = 0
     best_layer_over_k = 0
@@ -280,8 +288,31 @@ def load_generated_answers(args, i):
     file_path = f'./save_for_eval/{args.dataset_name}_hal_det/answers/{prefix}_hal_det_{args.model_name}_{args.dataset_name}_answers_index_{i}.npy'
     return np.load(file_path)
 
+def get_embed_generated_split(embed_generated, feat_loc, wild_q_indices, wild_q_indices_train, wild_q_indices_val):
+    feat_indices_wild = []
+    feat_indices_eval = []
+    feat_indices_test = []
+    for i in range(len(embed_generated)):
+        if i in wild_q_indices_train:
+            feat_indices_wild.extend(np.arange(i, i + 1).tolist())
+        elif i in wild_q_indices_val:
+            feat_indices_eval.extend(np.arange(i, i + 1).tolist())
+        elif i not in wild_q_indices:
+            feat_indices_test.extend(np.arange(1 * i, 1 * i + 1).tolist())
+    if feat_loc == 3:
+        embed_generated_wild = embed_generated[feat_indices_wild][:, 1:, :]
+        embed_generated_eval = embed_generated[feat_indices_eval][:, 1:, :]
+        embed_generated_test = embed_generated[feat_indices_test][:, 1:, :]
+    else:
+        embed_generated_wild = embed_generated[feat_indices_wild]
+        embed_generated_eval = embed_generated[feat_indices_eval]
+        embed_generated_test = embed_generated[feat_indices_test]
+
+    return embed_generated_wild, embed_generated_eval, embed_generated_test
+
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument('--seed', type=int, default=41)
     parser.add_argument('--model_name', type=str, default='llama2_chat_7B')
     parser.add_argument('--dataset_name', type=str, default='tqa')
     parser.add_argument('--num_gene', type=int, default=1)
@@ -297,6 +328,7 @@ def main():
     parser.add_argument("--model_dir", type=str, default=None, help='local directory with model data')
     args = parser.parse_args()
 
+    seed_everything(args.seed)
     dataset, used_indices = load_dataset_by_name(args)
     model, tokenizer = load_model(args)
     length = len(used_indices) if used_indices is not None else len(dataset)
@@ -331,7 +363,7 @@ def main():
         # Get the embeddings of the generated question and answers.
         embed_generated = []
 
-        for i in tqdm(range(length)):
+        for i in tqdm(range(length), desc="Generating embeddings from block output"):
             answers = load_generated_answers(args, i)
 
             for anw in answers:
@@ -351,7 +383,7 @@ def main():
         MLPS = [f"model.layers.{i}.mlp" for i in range(model.config.num_hidden_layers)]
         mlp_layer_embeddings = []
         attention_head_embeddings = []
-        for i in tqdm(range(length)):
+        for i in tqdm(range(length), desc="Generating embeddings from attention head and mlp output"):
             answers = load_generated_answers(args, i)
             for anw in answers:
                 prompt_text = generate_prompt(dataset, i, args.dataset_name, used_indices)
@@ -407,25 +439,17 @@ def main():
                 embed_generated = np.load(
                     f'save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_head_wise.npy',
                     allow_pickle=True)
-            feat_indices_wild = []
-            feat_indices_eval = []
+        else:
+            raise NotImplementedError("Batch generation is not implemented yet.")
 
-            for i in range(length):
-                if i in wild_q_indices_train:
-                    feat_indices_wild.extend(np.arange(i, i + 1).tolist())
-                elif i in wild_q_indices_val:
-                    feat_indices_eval.extend(np.arange(i, i + 1).tolist())
-            if feat_loc == 3:
-                embed_generated_wild = embed_generated[feat_indices_wild][:, 1:, :]
-                embed_generated_eval = embed_generated[feat_indices_eval][:, 1:, :]
-            else:
-                embed_generated_wild = embed_generated[feat_indices_wild]
-                embed_generated_eval = embed_generated[feat_indices_eval]
+        embed_generated_wild, embed_generated_eval, embed_generated_test = get_embed_generated_split(
+            embed_generated, feat_loc, wild_q_indices, wild_q_indices_train, wild_q_indices_val
+        )
 
         # returned_results = svd_embed_score(embed_generated_wild, gt_label_wild,
         #                                    1, 11, mean=0, svd=0, weight=args.weighted_svd)
 
-        # get the best hyper-parameters on validation set
+        # Get the best hyper-parameters on validation set
         returned_results = svd_embed_score(embed_generated_eval, gt_label_val,
                                            1, 11, mean=0, svd=0, weight=args.weighted_svd)
 
@@ -437,17 +461,7 @@ def main():
         assert scores.shape[1] == 1
         best_scores = np.sqrt(np.sum(np.square(scores), axis=1)) * returned_results['best_sign']
 
-        # direct projection
-        feat_indices_test = []
-
-        for i in range(length):
-            if i not in wild_q_indices:
-                feat_indices_test.extend(np.arange(1 * i, 1 * i + 1).tolist())
-        if feat_loc == 3:
-            embed_generated_test = embed_generated[feat_indices_test][:, 1:, :]
-        else:
-            embed_generated_test = embed_generated[feat_indices_test]
-
+        # Direct projection
         test_scores = np.mean(np.matmul(embed_generated_test[:,returned_results['best_layer'],:],
                                    projection), -1, keepdims=True)
 
@@ -458,12 +472,11 @@ def main():
                                  returned_results['best_sign'] *test_scores[gt_label_test == 0], plot=False)
         print_measures(measures[0], measures[1], measures[2], 'direct-projection')
 
-
+        # Train a linear classifier on the train set and get the best threshold when evaluating on the eval set
         thresholds = np.linspace(0,1, num=40)[1:-1]
         normalizer = lambda x: x / (np.linalg.norm(x, ord=2, axis=-1, keepdims=True) + 1e-10)
         auroc_over_thres = []
         best_layer_over_thres = []
-        from linear_probe import get_linear_acc
         for thres_wild in thresholds:
             best_auroc = 0
             for layer in range(len(embed_generated_wild[0])):
@@ -475,13 +488,10 @@ def main():
                 label_train = np.concatenate([np.ones(len(true_wild)),
                                               np.zeros(len(false_wild))], 0)
 
-
                 ## gt training, saplma
                 # embed_train = embed_generated_wild[:,layer,:]
                 # label_train = gt_label_wild
                 ## gt training, saplma
-
-
 
                 best_acc, final_acc, (
                 clf, best_state, best_preds, preds, labels_val), losses_train = get_linear_acc(
@@ -497,14 +507,10 @@ def main():
                 learning_rate = 0.05,
                 weight_decay = 0.0003)
 
-
-
                 clf.eval()
                 output = clf(torch.from_numpy(
                     embed_generated_eval[:, layer, :]).cuda())
                 pca_wild_score_binary_cls = torch.sigmoid(output)
-
-
                 pca_wild_score_binary_cls = pca_wild_score_binary_cls.cpu().data.numpy()
 
                 if np.isnan(pca_wild_score_binary_cls).sum() > 0:
@@ -523,7 +529,7 @@ def main():
         argmax_index = max(range(len(auroc_over_thres)), key=auroc_over_thres.__getitem__)
         print("the best threshold calculated on the eval set is: ", thresholds[argmax_index], "best layer is: ", best_layer_over_thres[argmax_index])
 
-        # get the result on the test set
+        # Get the result on the test set
         thres_wild_score = np.sort(best_scores)[int(len(best_scores) * thresholds[argmax_index])]
         true_wild = embed_generated_wild[:, best_layer_over_thres[argmax_index], :][best_scores > thres_wild_score]
         false_wild = embed_generated_wild[:, best_layer_over_thres[argmax_index], :][best_scores <= thres_wild_score]
@@ -531,8 +537,6 @@ def main():
         embed_train = np.concatenate([true_wild, false_wild], 0)
         label_train = np.concatenate([np.ones(len(true_wild)),
                                       np.zeros(len(false_wild))], 0)
-
-
 
         best_acc, final_acc, (
             clf, best_state, best_preds, preds, labels_val), losses_train = get_linear_acc(
