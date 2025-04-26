@@ -5,6 +5,7 @@ import evaluate
 import numpy as np
 import torch
 from baukit import TraceDict
+from bleurt_pytorch import BleurtForSequenceClassification, BleurtTokenizer
 from sklearn.decomposition import PCA
 from tqdm import tqdm
 
@@ -127,18 +128,8 @@ def svd_embed_score(
                 best_projection = projection
                 best_mean = mean_recorded
                 best_sign = sign_layer
-        print(
-            "k: ",
-            k,
-            "best result: ",
-            best_result,
-            "layer: ",
-            best_layer,
-            "mean: ",
-            mean,
-            "svd: ",
-            svd,
-        )
+
+        print("k: ", k, "best result: ", best_result, "layer: ", best_layer, "mean: ", mean, "svd: ", svd,)
 
         if best_auroc > best_auroc_over_k:
             best_auroc_over_k = best_auroc
@@ -150,20 +141,75 @@ def svd_embed_score(
             best_projection_over_k = best_projection
             best_mean_over_k = best_mean
 
-        return {
-            "k": best_k,
-            "best_layer": best_layer_over_k,
-            "best_auroc": best_auroc_over_k,
-            "best_result": best_result_over_k,
-            "best_scores": best_scores_over_k,
-            "best_mean": best_mean_over_k,
-            "best_sign": best_sign_over_k,
-            "best_projection": best_projection_over_k,
+    return {
+        "k": best_k,
+        "best_layer": best_layer_over_k,
+        "best_auroc": best_auroc_over_k,
+        "best_result": best_result_over_k,
+        "best_scores": best_scores_over_k,
+        "best_mean": best_mean_over_k,
+        "best_sign": best_sign_over_k,
+        "best_projection": best_projection_over_k,
+    }
+
+def generate_prompt(dataset, i, dataset_name, used_indices=None):
+    """Generate the appropriate prompt based on the dataset type."""
+    if dataset_name == 'tydiqa' and used_indices is not None:
+        question = dataset[int(used_indices[i])]['question']
+        context = dataset[int(used_indices[i])]['context']
+        prompt_text = f"Concisely answer the following question based on the information in the given passage: \n" \
+                      f" Passage: {context} \n Q: {question} \n A:"
+    elif dataset_name == 'coqa':
+        prompt_text = dataset[i]['prompt']
+    else:
+        question = dataset[i]['question']
+        prompt_text = f"Answer the question concisely. Q: {question} A:"
+    return prompt_text
+
+def clean_decoded(decoded, dataset_name):
+    """Clean the decoded output based on dataset-specific corner cases."""
+    if dataset_name in ['tqa', 'triviaqa'] and 'Answer the question concisely' in decoded:
+        decoded = decoded.split('Answer the question concisely')[0]
+    elif dataset_name == 'coqa' and 'Q:' in decoded:
+        decoded = decoded.split('Q:')[0]
+    return decoded
+
+def generate_answers(model, tokenizer, dataset_name, input_ids, num_gene, most_likely):
+    """Generate answers using the model."""
+    answers = []
+    for _ in range(num_gene):
+        generation_args = {
+            "input_ids": input_ids,
+            "max_new_tokens": 64,
+            "num_return_sequences": 1,
         }
+        if most_likely:
+            generation_args.update({"num_beams": 5, "do_sample": False})
+        else:
+            generation_args.update({"do_sample": True, "num_beams": 1, "temperature": 0.5, "top_p": 1.0})
+
+        generated = model.generate(**generation_args)
+        decoded = tokenizer.decode(generated[0, input_ids.shape[-1]:], skip_special_tokens=True)
+        decoded = clean_decoded(decoded, dataset_name)
+        answers.append(decoded)
+
+    return answers
+
+def load_model(args):
+    if args.generate_gt:
+        model = BleurtForSequenceClassification.from_pretrained('./models/BLEURT-20').cuda()
+        tokenizer = BleurtTokenizer.from_pretrained('./models/BLEURT-20')
+    else: 
+        model_name = HF_NAMES[args.model_name] if not args.model_dir else args.model_dir
+        tokenizer = llama_iti.LlamaTokenizer.from_pretrained(
+            model_name, trust_remote_code=True
+        )
+        model = llama_iti.LlamaForCausalLM.from_pretrained(
+            model_name, low_cpu_mem_usage=True, torch_dtype=torch.float16, device_map="auto"
+        ).cuda()
+    return model, tokenizer
 
 def main():
-
-
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_name', type=str, default='llama2_chat_7B')
     parser.add_argument('--dataset_name', type=str, default='tqa')
@@ -180,17 +226,11 @@ def main():
     parser.add_argument("--model_dir", type=str, default=None, help='local directory with model data')
     args = parser.parse_args()
 
-    MODEL = HF_NAMES[args.model_name] if not args.model_dir else args.model_dir
     dataset, used_indices = load_dataset_by_name(args)
+    model, tokenizer = load_model(args)
     length = len(used_indices) if used_indices is not None else len(dataset)
 
     if args.gene:
-        tokenizer = llama_iti.LlamaTokenizer.from_pretrained(MODEL, trust_remote_code=True)
-        model = llama_iti.LlamaForCausalLM.from_pretrained(MODEL, low_cpu_mem_usage=True, torch_dtype=torch.float16,
-                                                           device_map="auto").cuda()
-
-        begin_index = 0
-        end_index = length
 
         if not os.path.exists(f'./save_for_eval/{args.dataset_name}_hal_det/'):
             os.mkdir(f'./save_for_eval/{args.dataset_name}_hal_det/')
@@ -201,70 +241,16 @@ def main():
         period_token_id = [tokenizer(_)['input_ids'][-1] for _ in ['\n']]
         period_token_id += [tokenizer.eos_token_id]
 
-        for i in range(begin_index, end_index):
-            answers = [None] * args.num_gene
-            if args.dataset_name == 'tydiqa' and used_indices is not None:
-                question = dataset[int(used_indices[i])]['question']
-                prompt = tokenizer(
-                    "Concisely answer the following question based on the information in the given passage: \n" + \
-                    " Passage: " + dataset[int(used_indices[i])]['context'] + " \n Q: " + question + " \n A:",
-                    return_tensors='pt').input_ids.cuda()
-            elif args.dataset_name == 'coqa':
-                prompt = tokenizer(
-                    dataset[i]['prompt'], return_tensors='pt').input_ids.cuda()
-            else:
-                question = dataset[i]['question']
-                prompt = tokenizer(f"Answer the question concisely. Q: {question}" + " A:", return_tensors='pt').input_ids.cuda()
-            for gen_iter in range(args.num_gene):
-                if args.most_likely:
-                    generated = model.generate(prompt,
-                                                num_beams=5,
-                                                num_return_sequences=1,
-                                                do_sample=False,
-                                                max_new_tokens=64,
-                                               )
-                else:
-                    generated = model.generate(prompt,
-                                                do_sample=True,
-                                                num_return_sequences=1,
-                                                num_beams=1,
-                                                max_new_tokens=64,
-                                                temperature=0.5,
-                                                top_p=1.0)
+        for i in tqdm(range(0, length), desc="Generating answers"):
+            prompt_text = generate_prompt(dataset, i, args.dataset_name, used_indices)
+            input_ids = tokenizer(prompt_text, return_tensors='pt').input_ids.cuda()
+            answers = generate_answers(model, tokenizer, args.dataset_name,input_ids, args.num_gene, args.most_likely)
 
-
-                decoded = tokenizer.decode(generated[0, prompt.shape[-1]:],
-                                           skip_special_tokens=True)
-                if args.dataset_name == 'tqa' or args.dataset_name == 'triviaqa':
-                    # corner case.
-                    if 'Answer the question concisely' in decoded:
-                        print('#####error')
-                        print(decoded.split('Answer the question concisely')[1])
-                        print('#####error')
-                        decoded = decoded.split('Answer the question concisely')[0]
-                if args.dataset_name == 'coqa':
-                    if 'Q:' in decoded:
-                        print('#####error')
-                        print(decoded.split('Q:')[1])
-                        print('#####error')
-                        decoded = decoded.split('Q:')[0]
-                print(decoded)
-                answers[gen_iter] = decoded
-
-
-            print('sample: ', i)
-            if args.most_likely:
-                info = 'most_likely_'
-            else:
-                info = 'batch_generations_'
-            print("Saving answers")
+            info = 'most_likely_' if args.most_likely else 'batch_generations_'
             np.save(f'./save_for_eval/{args.dataset_name}_hal_det/answers/' + info + f'hal_det_{args.model_name}_{args.dataset_name}_answers_index_{i}.npy',
                     answers)
-    elif args.generate_gt:
-        from bleurt_pytorch import BleurtForSequenceClassification, BleurtTokenizer
 
-        model = BleurtForSequenceClassification.from_pretrained('./models/BLEURT-20').cuda()
-        tokenizer = BleurtTokenizer.from_pretrained('./models/BLEURT-20')
+    elif args.generate_gt:
         model.eval()
 
         rouge = evaluate.load('rouge')
@@ -339,11 +325,6 @@ def main():
                 np.save(f'./bg_{args.dataset_name}_bleurt_score.npy', gts)
 
     else:
-        tokenizer = llama_iti.LlamaTokenizer.from_pretrained(MODEL, trust_remote_code=True)
-        model = llama_iti.LlamaForCausalLM.from_pretrained(MODEL, low_cpu_mem_usage=True,
-                                                           torch_dtype=torch.float16,
-                                                           device_map="auto").cuda()
-
         # firstly get the embeddings of the generated question and answers.
         embed_generated = []
 
@@ -356,20 +337,11 @@ def main():
                 f'save_for_eval/{args.dataset_name}_hal_det/answers/most_likely_hal_det_{args.model_name}_{args.dataset_name}_answers_index_{i}.npy')
 
             for anw in answers:
+                prompt_text = generate_prompt(dataset, i, args.dataset_name, used_indices)
+                input_ids = tokenizer(prompt_text, return_tensors='pt').input_ids.cuda()
 
-                if args.dataset_name == 'tydiqa':
-                    prompt = tokenizer(
-                        "Concisely answer the following question based on the information in the given passage: \n" + \
-                        " Passage: " + dataset[int(used_indices[i])]['context'] + " \n Q: " + question + " \n A:",
-                        return_tensors='pt').input_ids.cuda()
-                elif args.dataset_name == 'coqa':
-                    prompt = tokenizer(dataset[i]['prompt'] + anw, return_tensors='pt').input_ids.cuda()
-                else:
-                    prompt = tokenizer(
-                        f"Answer the question concisely. Q: {question}" + " A:" + anw,
-                        return_tensors='pt').input_ids.cuda()
                 with torch.no_grad():
-                    hidden_states = model(prompt, output_hidden_states=True).hidden_states
+                    hidden_states = model(input_ids, output_hidden_states=True).hidden_states
                     hidden_states = torch.stack(hidden_states, dim=0).squeeze()
                     hidden_states = hidden_states.detach().cpu().numpy()[:, -1, :]
                     embed_generated.append(hidden_states)
@@ -390,21 +362,12 @@ def main():
             answers = np.load(
                 f'save_for_eval/{args.dataset_name}_hal_det/answers/most_likely_hal_det_{args.model_name}_{args.dataset_name}_answers_index_{i}.npy')
             for anw in answers:
-                if args.dataset_name == 'tydiqa':
-                    prompt = tokenizer(
-                        "Concisely answer the following question based on the information in the given passage: \n" + \
-                        " Passage: " + dataset[int(used_indices[i])]['context'] + " \n Q: " + question + " \n A:",
-                        return_tensors='pt').input_ids.cuda()
-                elif args.dataset_name == 'coqa':
-                    prompt = tokenizer(dataset[i]['prompt'] + anw, return_tensors='pt').input_ids.cuda()
-                else:
-                    prompt = tokenizer(
-                        f"Answer the question concisely. Q: {question}" + " A:" + anw,
-                        return_tensors='pt').input_ids.cuda()
+                prompt_text = generate_prompt(dataset, i, args.dataset_name, used_indices)
+                input_ids = tokenizer(prompt_text, return_tensors='pt').input_ids.cuda()
 
                 with torch.no_grad():
                     with TraceDict(model, HEADS + MLPS) as ret:
-                        output = model(prompt, output_hidden_states=True)
+                        output = model(input_ids, output_hidden_states=True)
                     head_wise_hidden_states = [ret[head].output.squeeze().detach().cpu() for head in HEADS]
                     head_wise_hidden_states = torch.stack(head_wise_hidden_states, dim=0).squeeze().numpy()
                     mlp_wise_hidden_states = [ret[mlp].output.squeeze().detach().cpu() for mlp in MLPS]
