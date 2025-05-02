@@ -49,7 +49,7 @@ def load_dataset_by_name(args):
         dataset = load_coqa_dataset(model)
         return dataset, None
     elif args.dataset_name == "2wikimultihopqa":
-        path = "/data/namcao/dynamic_rag/2wikimultihopqa"
+        path = "./data/2WMQA_cot.jsonl"
         dataset = WikiMultiHopQA(path)
         return dataset, None
     else:
@@ -143,11 +143,13 @@ def load_coqa_dataset(model):
     )
     return dataset
 
+
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", type=str, default="llama2_chat_7B")
-    parser.add_argument("--dataset_name", type=str, default="tqa")
+    parser.add_argument("--dataset_name", type=str, default="2wikimultihopqa")
     return parser.parse_args()
+
 
 if __name__ == "__main__":
     args = get_args()
