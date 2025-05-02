@@ -50,7 +50,9 @@ def load_dataset_by_name(args):
         return dataset, None
     elif args.dataset_name == "2wikimultihopqa":
         path = "./data/2WMQA_cot.jsonl"
-        dataset = WikiMultiHopQA(path)
+        data = WikiMultiHopQA(path)
+        data.format(fewshot=args.fewshots)
+        dataset = data.dataset
         return dataset, None
     else:
         raise ValueError("Invalid dataset name")
