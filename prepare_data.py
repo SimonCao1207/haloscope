@@ -150,6 +150,7 @@ def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", type=str, default="llama2_chat_7B")
     parser.add_argument("--dataset_name", type=str, default="2wikimultihopqa")
+    parser.add_argument("--fewshots", type=int, default=6)
     return parser.parse_args()
 
 
@@ -158,4 +159,7 @@ if __name__ == "__main__":
     dataset, used_indices = load_dataset_by_name(args)
     length = len(dataset) if used_indices is None else len(used_indices)
     print(f"Dataset loaded with {length} samples.")
-    print(f"Sample data {dataset[0]}")
+    if args.dataset_name == "2wikimultihopqa":
+        print(f"Sample all_answers {dataset[0]['all_answers']}")
+    else:
+        print(f"Sample data {dataset[0]}")

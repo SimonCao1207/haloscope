@@ -105,13 +105,12 @@ class BaseDataset:
                 )
             else:
                 cot = None
-            a = example["answer"]
 
             query = input_template_func(q)
             if use_answer:
                 query += (
                     "" if query[-1] in {"\n", " "} else " "
-                ) + self.output_template(cot, a)
+                ) + self.output_template(cot, example["answer"])
             return query
 
         # demo

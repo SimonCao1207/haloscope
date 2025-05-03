@@ -3,8 +3,11 @@ import logging
 import os
 from typing import Dict, List
 
+import spacy
 from datasets import Dataset
 from tqdm import tqdm
+
+nlp = spacy.load("en_core_web_sm")
 
 from .base_dataset import BaseDataset
 
@@ -67,14 +70,27 @@ class WikiMultiHopQA(BaseDataset):
             for line in tqdm(fin):
                 example = json.loads(line)
                 question = example["question"]
-                ans = example["answer"]
+                all_answers = self.split_sentences(example["answer"])
                 dataset.append(
                     {
                         "question": question,
-                        "answer": ans,
+                        "all_answers": all_answers,
                     }
                 )
         self.dataset = Dataset.from_list(dataset)
+
+    def split_sentences(self, text):
+        sentences = [sent.text.strip() for sent in nlp(text).sents]
+        sentences = [sent for sent in sentences if len(sent) > 0]
+        return sentences
+
+    def get_top_sentence(self, text):
+        sentences = self.split_sentences(text)
+        return sentences[0] if len(sentences) > 0 else ""
+
+    def get_last_sentence(self, text):
+        sentences = self.split_sentences(text)
+        return sentences[-1] if len(sentences) > 0 else ""
 
     def __len__(self):
         return len(self.dataset)

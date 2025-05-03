@@ -175,28 +175,38 @@ def svd_embed_score(
     }
 
 
+def _generate_prompt(dataset, i):
+    demo, case = dataset[i]["demo"], dataset[i]["case"]
+    exemplars = "".join([d["case"] + "\n" for d in demo])
+    prompt_text = exemplars
+    prompt_text += 'Answer in the same format as before. Please ensure that the final sentence of the answer starts with "So the answer is".\n'
+    prompt_text += case
+    return prompt_text
+
+
 def generate_prompt(dataset, i, dataset_name, used_indices=None):
     """Generate the appropriate prompt based on the dataset type."""
     if dataset_name == "tydiqa" and used_indices is not None:
         question = dataset[int(used_indices[i])]["question"]
         context = dataset[int(used_indices[i])]["context"]
-        prompt_text = (
+        prompts = (
             f"Concisely answer the following question based on the information in the given passage: \n"
             f" Passage: {context} \n Q: {question} \n A:"
         )
     elif dataset_name == "coqa":
-        prompt_text = dataset[i]["prompt"]
+        prompts = dataset[i]["prompt"]
     elif dataset_name == "2wikimultihopqa":
-        demo, case = dataset[i]["demo"], dataset[i]["case"]
-        exemplars = "".join([d["case"] + "\n" for d in demo])
-        prompt_text = exemplars
-        prompt_text += 'Answer in the same format as before. Please ensure that the final sentence of the answer starts with "So the answer is".\n'
-        prompt_text += case
+        all_answers = dataset[i]["all_answers"]
+        prompts = []
+        prefix = _generate_prompt(dataset, i)
+        prompts.append(prefix)
+        for j in range(1, len(all_answers)):
+            prompts.append(f"{prefix} {' '.join(all_answers[:j])}")
     else:
         question = dataset[i]["question"]
-        prompt_text = f"Answer the question concisely. Q: {question} A:"
+        prompts = f"Answer the question concisely. Q: {question} A:"
 
-    return prompt_text
+    return prompts
 
 
 def clean_decoded(decoded, dataset_name):
@@ -214,25 +224,48 @@ def clean_decoded(decoded, dataset_name):
 def generate_answers(model, tokenizer, dataset_name, input_ids, num_gene, most_likely):
     """Generate answers using the model."""
     answers = []
-    for _ in range(num_gene):
+    if dataset_name == "2wikimultihopqa":
+        assert num_gene == 1, "Only one answer is generated for 2wikimultihopqa."
+        assert most_likely == 1, "Only most-likely generation is supported."
+        attention_mask = (input_ids != tokenizer.pad_token_id).long()
         generation_args = {
             "input_ids": input_ids,
+            "attention_mask": attention_mask,
             "max_new_tokens": 64,
             "num_return_sequences": 1,
+            "return_dict_in_generate": True,
+            "num_beams": 5,
+            "do_sample": False,
         }
-        if most_likely:
-            generation_args.update({"num_beams": 5, "do_sample": False})
-        else:
-            generation_args.update(
-                {"do_sample": True, "num_beams": 1, "temperature": 0.5, "top_p": 1.0}
-            )
+        outputs = model.generate(**generation_args)
+        input_length = input_ids.shape[-1]
+        generated_tokens = outputs.sequences[:, input_length:]
+        answers = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
+    else:
+        for _ in range(num_gene):
+            generation_args = {
+                "input_ids": input_ids,
+                "max_new_tokens": 64,
+                "num_return_sequences": 1,
+            }
+            if most_likely:
+                generation_args.update({"num_beams": 5, "do_sample": False})
+            else:
+                generation_args.update(
+                    {
+                        "do_sample": True,
+                        "num_beams": 1,
+                        "temperature": 0.5,
+                        "top_p": 1.0,
+                    }
+                )
 
-        generated = model.generate(**generation_args)
-        decoded = tokenizer.decode(
-            generated[0, input_ids.shape[-1] :], skip_special_tokens=True
-        )
-        decoded = clean_decoded(decoded, dataset_name)
-        answers.append(decoded)
+            generated = model.generate(**generation_args)
+            decoded = tokenizer.decode(
+                generated[0, input_ids.shape[-1] :], skip_special_tokens=True
+            )
+            decoded = clean_decoded(decoded, dataset_name)
+            answers.append(decoded)
 
     return answers
 
@@ -330,6 +363,8 @@ def get_correct_answers(dataset, i, dataset_name, used_indices=None):
         all_answers = dataset[i]["answer"]
     elif dataset_name == "tydiqa":
         all_answers = dataset[int(used_indices[i])]["answers"]["text"]
+    elif dataset_name == "2wikimultihopqa":
+        all_answers = dataset[i]["all_answers"]
     return all_answers
 
 
@@ -344,6 +379,17 @@ def load_generated_answers(args, i):
     prefix = "most_likely" if args.most_likely else "batch_generations"
     file_path = f"./save_for_eval/{args.dataset_name}_hal_det/answers/{prefix}_hal_det_{args.model_name}_{args.dataset_name}_answers_index_{i}.npy"
     return np.load(file_path)
+
+
+def post_process(preds, args):
+    preds = list(preds) if isinstance(preds, str) else preds
+    if args.dataset_name == "2wikimultihopqa":
+        for i in range(len(preds)):
+            preds[i] = preds[i].strip()
+            preds[i] = preds[i].split("\n")[0]
+            return preds
+    else:
+        return preds
 
 
 def get_embed_generated_split(
@@ -418,8 +464,6 @@ def main():
                 args.num_gene,
                 args.most_likely,
             )
-            # breakpoint()
-
             save_generated_answers(
                 args.dataset_name, args.model_name, answers, i, args.most_likely
             )
@@ -431,6 +475,7 @@ def main():
                 dataset, i, args.dataset_name, used_indices
             )
             predictions = load_generated_answers(args, i)
+            predictions = post_process(predictions, args)
             if args.use_rouge:
                 all_results, _, _ = compute_rouge_scores(predictions, all_answers)
             else:
