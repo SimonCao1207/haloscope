@@ -243,8 +243,10 @@ def generate_answers(model, tokenizer, dataset_name, input_ids, num_gene, most_l
         answers = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
     else:
         for _ in range(num_gene):
+            attention_mask = (input_ids != tokenizer.pad_token_id).long()
             generation_args = {
                 "input_ids": input_ids,
+                "attention_mask": attention_mask,
                 "max_new_tokens": 64,
                 "num_return_sequences": 1,
             }
@@ -453,8 +455,9 @@ def main():
 
         for i in tqdm(range(0, length), desc="Generating answers"):
             prompt_text = generate_prompt(dataset, i, args.dataset_name, used_indices)
+            padding = True if args.dataset_name == "2wikimultihopqa" else False
             input_ids = tokenizer(
-                prompt_text, return_tensors="pt", padding=True
+                prompt_text, return_tensors="pt", padding=padding
             ).input_ids.cuda()
             answers = generate_answers(
                 model,
@@ -504,7 +507,9 @@ def main():
                         input_ids, output_hidden_states=True
                     ).hidden_states
                     hidden_states = torch.stack(hidden_states, dim=0).squeeze()
-                    hidden_states = hidden_states.detach().cpu().numpy()[:, -1, :]
+                    hidden_states = (
+                        hidden_states.detach().to(torch.float32).cpu().numpy()[:, -1, :]
+                    )
                     embed_generated.append(hidden_states)
         embed_generated = np.asarray(np.stack(embed_generated), dtype=np.float32)
         np.save(
@@ -512,11 +517,18 @@ def main():
             embed_generated,
         )
 
-        HEADS = [
-            f"model.layers.{i}.self_attn.head_out"
-            for i in range(model.config.num_hidden_layers)
-        ]
+        if args.model_name == "llama3-1-8B-instruct":
+            HEADS = [
+                f"model.layers.{i}.self_attn.o_proj"
+                for i in range(model.config.num_hidden_layers)
+            ]
+        else:
+            HEADS = [
+                f"model.layers.{i}.self_attn.head_out"
+                for i in range(model.config.num_hidden_layers)
+            ]
         MLPS = [f"model.layers.{i}.mlp" for i in range(model.config.num_hidden_layers)]
+
         mlp_layer_embeddings = []
         attention_head_embeddings = []
         for i in tqdm(
@@ -538,13 +550,19 @@ def main():
                         ret[head].output.squeeze().detach().cpu() for head in HEADS
                     ]
                     head_wise_hidden_states = (
-                        torch.stack(head_wise_hidden_states, dim=0).squeeze().numpy()
+                        torch.stack(head_wise_hidden_states, dim=0)
+                        .squeeze()
+                        .to(torch.float32)
+                        .numpy()
                     )
                     mlp_wise_hidden_states = [
                         ret[mlp].output.squeeze().detach().cpu() for mlp in MLPS
                     ]
                     mlp_wise_hidden_states = (
-                        torch.stack(mlp_wise_hidden_states, dim=0).squeeze().numpy()
+                        torch.stack(mlp_wise_hidden_states, dim=0)
+                        .squeeze()
+                        .to(torch.float32)
+                        .numpy()
                     )
 
                     mlp_layer_embeddings.append(mlp_wise_hidden_states[:, -1, :])
