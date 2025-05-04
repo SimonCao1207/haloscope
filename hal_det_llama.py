@@ -490,7 +490,7 @@ def main():
             )
     elif args.generate_gt:
         model.eval()
-        gts = [] if args.dataset_name == "2wikimultihopqa" else np.zeros(0)
+        gts = np.zeros(0)
         for i in tqdm(range(length), desc="Generating ground truth"):
             all_answers = get_correct_answers(
                 dataset, i, args.dataset_name, used_indices
@@ -508,7 +508,7 @@ def main():
                     model, tokenizer, predictions, all_answers
                 )
             if args.dataset_name == "2wikimultihopqa":
-                gts.append(all_results.diagonal())
+                gts = np.concatenate([gts, all_results.diagonal()], 0)
             else:
                 gts = np.concatenate([gts, np.max(all_results, axis=0)], 0)
         save_scores(args, gts)
@@ -538,7 +538,10 @@ def main():
                 )
                 embed_generated.append(hidden_states)
 
-        embed_generated = np.asarray(np.stack(embed_generated), dtype=np.float32)
+        embed_generated = np.asarray(
+            np.stack(embed_generated), dtype=np.float32
+        )  # (num_preds, num_layers, hidden_size)
+
         np.save(
             f"save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_layer_wise.npy",
             embed_generated,
