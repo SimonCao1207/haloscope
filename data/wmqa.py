@@ -70,7 +70,7 @@ class WikiMultiHopQA(BaseDataset):
             for line in tqdm(fin):
                 example = json.loads(line)
                 question = example["question"]
-                all_answers = self.split_sentences(example["answer"])
+                all_answers = split_sentences(example["answer"])
                 dataset.append(
                     {
                         "question": question,
@@ -79,21 +79,24 @@ class WikiMultiHopQA(BaseDataset):
                 )
         self.dataset = Dataset.from_list(dataset)
 
-    def split_sentences(self, text):
-        sentences = [sent.text.strip() for sent in nlp(text).sents]
-        sentences = [sent for sent in sentences if len(sent) > 0]
-        return sentences
-
-    def get_top_sentence(self, text):
-        sentences = self.split_sentences(text)
-        return sentences[0] if len(sentences) > 0 else ""
-
-    def get_last_sentence(self, text):
-        sentences = self.split_sentences(text)
-        return sentences[-1] if len(sentences) > 0 else ""
-
     def __len__(self):
         return len(self.dataset)
 
     def __getitem__(self, index):
         return self.dataset[index]
+
+
+def split_sentences(text):
+    sentences = [sent.text.strip() for sent in nlp(text).sents]
+    sentences = [sent for sent in sentences if len(sent) > 0]
+    return sentences
+
+
+def get_top_sentence(text):
+    sentences = split_sentences(text)
+    return sentences[0] if len(sentences) > 0 else ""
+
+
+def get_last_sentence(self, text):
+    sentences = split_sentences(text)
+    return sentences[-1] if len(sentences) > 0 else ""

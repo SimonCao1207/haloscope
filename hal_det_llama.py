@@ -1,5 +1,6 @@
 import argparse
 import os
+from typing import List
 
 import evaluate
 import numpy as np
@@ -11,6 +12,7 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import llama_iti
+from data.wmqa import get_top_sentence
 from linear_probe import get_linear_acc
 from metric_utils import get_measures, print_measures
 from prepare_data import load_dataset_by_name
@@ -184,7 +186,7 @@ def _generate_prompt(dataset, i):
     return prompt_text
 
 
-def generate_prompt(dataset, i, dataset_name, used_indices=None):
+def generate_prompts(dataset, i, dataset_name, used_indices=None) -> List[str]:
     """Generate the appropriate prompt based on the dataset type."""
     if dataset_name == "tydiqa" and used_indices is not None:
         question = dataset[int(used_indices[i])]["question"]
@@ -205,6 +207,9 @@ def generate_prompt(dataset, i, dataset_name, used_indices=None):
     else:
         question = dataset[i]["question"]
         prompts = f"Answer the question concisely. Q: {question} A:"
+
+    if isinstance(prompts, str):
+        prompts = [prompts]
 
     return prompts
 
@@ -388,9 +393,10 @@ def post_process(preds, args):
     if args.dataset_name == "2wikimultihopqa":
         for i in range(len(preds)):
             preds[i] = preds[i].strip()
-            preds[i] = preds[i].split("\n")[0]
-            return preds
+            preds[i] = get_top_sentence(str(preds[i]))
+        return preds
     else:
+        preds = [p.strip() for p in preds]
         return preds
 
 
@@ -417,6 +423,18 @@ def get_embed_generated_split(
         embed_generated_test = embed_generated[feat_indices_test]
 
     return embed_generated_wild, embed_generated_eval, embed_generated_test
+
+
+def _get_index_conclusion(predictions):
+    """Get the index of the conclusion sentence in the predictions."""
+    for i in range(len(predictions)):
+        if (
+            "So the answer is" in predictions[i]
+            or "Thus" in predictions[i]
+            or "Therefore" in predictions[i]
+        ):
+            return i
+    return -1
 
 
 def main():
@@ -454,12 +472,12 @@ def main():
             os.mkdir(f"./save_for_eval/{args.dataset_name}_hal_det/answers")
 
         for i in tqdm(range(0, length), desc="Generating answers"):
-            prompt_text = generate_prompt(dataset, i, args.dataset_name, used_indices)
+            prompts = generate_prompts(dataset, i, args.dataset_name, used_indices)
             padding = True if args.dataset_name == "2wikimultihopqa" else False
             input_ids = tokenizer(
-                prompt_text, return_tensors="pt", padding=padding
+                prompts, return_tensors="pt", padding=padding
             ).input_ids.cuda()
-            answers = generate_answers(
+            predictions = generate_answers(
                 model,
                 tokenizer,
                 args.dataset_name,
@@ -468,49 +486,58 @@ def main():
                 args.most_likely,
             )
             save_generated_answers(
-                args.dataset_name, args.model_name, answers, i, args.most_likely
+                args.dataset_name, args.model_name, predictions, i, args.most_likely
             )
     elif args.generate_gt:
         model.eval()
-        gts = np.zeros(0)
+        gts = [] if args.dataset_name == "2wikimultihopqa" else np.zeros(0)
         for i in tqdm(range(length), desc="Generating ground truth"):
             all_answers = get_correct_answers(
                 dataset, i, args.dataset_name, used_indices
             )
             predictions = load_generated_answers(args, i)
             predictions = post_process(predictions, args)
+            if args.dataset_name == "2wikimultihopqa":
+                k = _get_index_conclusion(predictions)
+                predictions = predictions[:k]
+                all_answers = all_answers[:k]
             if args.use_rouge:
                 all_results, _, _ = compute_rouge_scores(predictions, all_answers)
             else:
                 all_results = compute_bleurt_scores(
                     model, tokenizer, predictions, all_answers
                 )
-            gts = np.concatenate([gts, np.max(all_results, axis=0)], 0)
-
+            if args.dataset_name == "2wikimultihopqa":
+                gts.append(all_results.diagonal())
+            else:
+                gts = np.concatenate([gts, np.max(all_results, axis=0)], 0)
         save_scores(args, gts)
     else:
         # Get the embeddings of the generated question and answers.
         embed_generated = []
 
         for i in tqdm(range(length), desc="Generating embeddings from block output"):
-            answers = load_generated_answers(args, i)
+            predictions = load_generated_answers(args, i)
 
-            for anw in answers:
-                prompt_text = generate_prompt(
-                    dataset, i, args.dataset_name, used_indices
+            prompts = generate_prompts(dataset, i, args.dataset_name, used_indices)
+            for j, pred in enumerate(predictions):
+                prompts[j] += f" {pred}"
+
+            input_ids = tokenizer(
+                prompts, return_tensors="pt", padding=True
+            ).input_ids.cuda()
+
+            with torch.no_grad():
+                hidden_states = model(
+                    input_ids, output_hidden_states=True
+                ).hidden_states
+                hidden_states = torch.stack(hidden_states, dim=0).squeeze()
+                # get the hidden states of the last token
+                hidden_states = (
+                    hidden_states.detach().to(torch.float32).cpu().numpy()[:, -1, :]
                 )
-                prompt_text += f" {anw}"
-                input_ids = tokenizer(prompt_text, return_tensors="pt").input_ids.cuda()
+                embed_generated.append(hidden_states)
 
-                with torch.no_grad():
-                    hidden_states = model(
-                        input_ids, output_hidden_states=True
-                    ).hidden_states
-                    hidden_states = torch.stack(hidden_states, dim=0).squeeze()
-                    hidden_states = (
-                        hidden_states.detach().to(torch.float32).cpu().numpy()[:, -1, :]
-                    )
-                    embed_generated.append(hidden_states)
         embed_generated = np.asarray(np.stack(embed_generated), dtype=np.float32)
         np.save(
             f"save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_layer_wise.npy",
@@ -535,38 +562,39 @@ def main():
             range(length),
             desc="Generating embeddings from attention head and mlp output",
         ):
-            answers = load_generated_answers(args, i)
-            for anw in answers:
-                prompt_text = generate_prompt(
-                    dataset, i, args.dataset_name, used_indices
+            predictions = load_generated_answers(args, i)
+            prompts = generate_prompts(dataset, i, args.dataset_name, used_indices)
+            for j, pred in enumerate(predictions):
+                prompts[j] += f" {pred}"
+
+            input_ids = tokenizer(
+                prompts, return_tensors="pt", padding=True
+            ).input_ids.cuda()
+
+            with torch.no_grad():
+                with TraceDict(model, HEADS + MLPS) as ret:
+                    output = model(input_ids, output_hidden_states=True)
+                head_wise_hidden_states = [
+                    ret[head].output.squeeze().detach().cpu() for head in HEADS
+                ]
+                head_wise_hidden_states = (
+                    torch.stack(head_wise_hidden_states, dim=0)
+                    .squeeze()
+                    .to(torch.float32)
+                    .numpy()
                 )
-                prompt_text += f" {anw}"
-                input_ids = tokenizer(prompt_text, return_tensors="pt").input_ids.cuda()
+                mlp_wise_hidden_states = [
+                    ret[mlp].output.squeeze().detach().cpu() for mlp in MLPS
+                ]
+                mlp_wise_hidden_states = (
+                    torch.stack(mlp_wise_hidden_states, dim=0)
+                    .squeeze()
+                    .to(torch.float32)
+                    .numpy()
+                )
 
-                with torch.no_grad():
-                    with TraceDict(model, HEADS + MLPS) as ret:
-                        output = model(input_ids, output_hidden_states=True)
-                    head_wise_hidden_states = [
-                        ret[head].output.squeeze().detach().cpu() for head in HEADS
-                    ]
-                    head_wise_hidden_states = (
-                        torch.stack(head_wise_hidden_states, dim=0)
-                        .squeeze()
-                        .to(torch.float32)
-                        .numpy()
-                    )
-                    mlp_wise_hidden_states = [
-                        ret[mlp].output.squeeze().detach().cpu() for mlp in MLPS
-                    ]
-                    mlp_wise_hidden_states = (
-                        torch.stack(mlp_wise_hidden_states, dim=0)
-                        .squeeze()
-                        .to(torch.float32)
-                        .numpy()
-                    )
-
-                    mlp_layer_embeddings.append(mlp_wise_hidden_states[:, -1, :])
-                    attention_head_embeddings.append(head_wise_hidden_states[:, -1, :])
+                mlp_layer_embeddings.append(mlp_wise_hidden_states[:, -1, :])
+                attention_head_embeddings.append(head_wise_hidden_states[:, -1, :])
         mlp_layer_embeddings = np.asarray(
             np.stack(mlp_layer_embeddings), dtype=np.float32
         )
