@@ -515,37 +515,8 @@ def main():
     else:
         # Get the embeddings of the generated question and answers.
         embed_generated = []
-
-        for i in tqdm(range(length), desc="Generating embeddings from block output"):
-            predictions = load_generated_answers(args, i)
-
-            prompts = generate_prompts(dataset, i, args.dataset_name, used_indices)
-            for j, pred in enumerate(predictions):
-                prompts[j] += f" {pred}"
-
-            input_ids = tokenizer(
-                prompts, return_tensors="pt", padding=True
-            ).input_ids.cuda()
-
-            with torch.no_grad():
-                hidden_states = model(
-                    input_ids, output_hidden_states=True
-                ).hidden_states
-                hidden_states = torch.stack(hidden_states, dim=0).squeeze()
-                # get the hidden states of the last token
-                hidden_states = (
-                    hidden_states.detach().to(torch.float32).cpu().numpy()[:, -1, :]
-                )
-                embed_generated.append(hidden_states)
-
-        embed_generated = np.asarray(
-            np.stack(embed_generated), dtype=np.float32
-        )  # (num_preds, num_layers, hidden_size)
-
-        np.save(
-            f"save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_layer_wise.npy",
-            embed_generated,
-        )
+        mlp_layer_embeddings = []
+        attention_head_embeddings = []
 
         if args.model_name == "llama3-1-8B-instruct":
             HEADS = [
@@ -559,11 +530,9 @@ def main():
             ]
         MLPS = [f"model.layers.{i}.mlp" for i in range(model.config.num_hidden_layers)]
 
-        mlp_layer_embeddings = []
-        attention_head_embeddings = []
         for i in tqdm(
             range(length),
-            desc="Generating embeddings from attention head and mlp output",
+            desc=f"Generating features at feat_loc_svd={args.feat_loc_svd}",
         ):
             predictions = load_generated_answers(args, i)
             prompts = generate_prompts(dataset, i, args.dataset_name, used_indices)
@@ -575,44 +544,69 @@ def main():
             ).input_ids.cuda()
 
             with torch.no_grad():
-                with TraceDict(model, HEADS + MLPS) as ret:
-                    output = model(input_ids, output_hidden_states=True)
-                head_wise_hidden_states = [
-                    ret[head].output.squeeze().detach().cpu() for head in HEADS
-                ]
-                head_wise_hidden_states = (
-                    torch.stack(head_wise_hidden_states, dim=0)
-                    .squeeze()
-                    .to(torch.float32)
-                    .numpy()
-                )
-                mlp_wise_hidden_states = [
-                    ret[mlp].output.squeeze().detach().cpu() for mlp in MLPS
-                ]
-                mlp_wise_hidden_states = (
-                    torch.stack(mlp_wise_hidden_states, dim=0)
-                    .squeeze()
-                    .to(torch.float32)
-                    .numpy()
-                )
+                if args.feat_loc_svd == 3:
+                    output = model(
+                        input_ids, output_hidden_states=True, device_map="auto"
+                    )
 
-                mlp_layer_embeddings.append(mlp_wise_hidden_states[:, -1, :])
-                attention_head_embeddings.append(head_wise_hidden_states[:, -1, :])
-        mlp_layer_embeddings = np.asarray(
-            np.stack(mlp_layer_embeddings), dtype=np.float32
-        )
-        attention_head_embeddings = np.asarray(
-            np.stack(attention_head_embeddings), dtype=np.float32
-        )
+                    hidden_states = output.hidden_states
+                    hidden_states = torch.stack(hidden_states, dim=0).squeeze()
+                    # get the hidden states of the last token
+                    hidden_states = (
+                        hidden_states.detach().to(torch.float32).cpu().numpy()[:, -1, :]
+                    )
+                    embed_generated.append(hidden_states)
+                else:
+                    with TraceDict(model, HEADS + MLPS) as ret:
+                        output = model(
+                            input_ids, output_hidden_states=True, device_map="auto"
+                        )
+                    head_wise_hidden_states = [
+                        ret[head].output.squeeze().detach().cpu() for head in HEADS
+                    ]
+                    head_wise_hidden_states = (
+                        torch.stack(head_wise_hidden_states, dim=0)
+                        .squeeze()
+                        .to(torch.float32)
+                        .numpy()
+                    )
+                    mlp_wise_hidden_states = [
+                        ret[mlp].output.squeeze().detach().cpu() for mlp in MLPS
+                    ]
+                    mlp_wise_hidden_states = (
+                        torch.stack(mlp_wise_hidden_states, dim=0)
+                        .squeeze()
+                        .to(torch.float32)
+                        .numpy()
+                    )
 
-        np.save(
-            f"save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_head_wise.npy",
-            attention_head_embeddings,
-        )
-        np.save(
-            f"save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_embeddings_mlp_wise.npy",
-            mlp_layer_embeddings,
-        )
+                    mlp_layer_embeddings.append(mlp_wise_hidden_states[:, -1, :])
+                    attention_head_embeddings.append(head_wise_hidden_states[:, -1, :])
+        if args.feat_loc_svd == 3:
+            embed_generated = np.asarray(
+                np.stack(embed_generated), dtype=np.float32
+            )  # (num_preds, num_layers, hidden_size)
+
+            np.save(
+                f"save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_layer_wise.npy",
+                embed_generated,
+            )
+        else:
+            mlp_layer_embeddings = np.asarray(
+                np.stack(mlp_layer_embeddings), dtype=np.float32
+            )
+            attention_head_embeddings = np.asarray(
+                np.stack(attention_head_embeddings), dtype=np.float32
+            )
+
+            np.save(
+                f"save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_head_wise.npy",
+                attention_head_embeddings,
+            )
+            np.save(
+                f"save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_embeddings_mlp_wise.npy",
+                mlp_layer_embeddings,
+            )
 
         # Get the split and label (true or false) of the unlabeled data and the test data.
         score_type = "rouge" if args.use_rouge else "bleurt"
