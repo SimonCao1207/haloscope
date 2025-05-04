@@ -437,6 +437,87 @@ def _get_index_conclusion(predictions):
     return -1
 
 
+def generate_embeddings(args, dataset, used_indices, length, model, tokenizer):
+    embed_generated = []
+    mlp_layer_embeddings = []
+    attention_head_embeddings = []
+
+    if args.model_name == "llama3-1-8B-instruct":
+        HEADS = [
+            f"model.layers.{i}.self_attn.o_proj"
+            for i in range(model.config.num_hidden_layers)
+        ]
+    else:
+        HEADS = [
+            f"model.layers.{i}.self_attn.head_out"
+            for i in range(model.config.num_hidden_layers)
+        ]
+    MLPS = [f"model.layers.{i}.mlp" for i in range(model.config.num_hidden_layers)]
+
+    for i in tqdm(
+        range(length),
+        desc=f"Generating features at feat_loc_svd={args.feat_loc_svd}",
+    ):
+        predictions = load_generated_answers(args, i)
+        predictions = post_process(predictions, args)
+        k = len(predictions)
+        if args.dataset_name == "2wikimultihopqa":
+            k = _get_index_conclusion(predictions)
+            predictions = predictions[:k]
+        if len(predictions) == 0:
+            continue
+        prompts = generate_prompts(dataset, i, args.dataset_name, used_indices)
+        prompts = prompts[:k]
+        for j, pred in enumerate(predictions):
+            prompts[j] += f" {pred}"
+
+        input_ids = tokenizer(
+            prompts, return_tensors="pt", padding=True
+        ).input_ids.cuda()
+
+        with torch.no_grad():
+            if args.feat_loc_svd == 3:
+                output = model(
+                    input_ids, output_hidden_states=True, device_map="auto"
+                )
+
+                hidden_states = output.hidden_states
+                hidden_states = torch.stack(hidden_states, dim=0)
+                # get the hidden states of the last token
+                hidden_states = (
+                    hidden_states.detach().to(torch.float32).cpu().numpy()[..., -1, :]
+                )
+                embed_generated.append(hidden_states)
+            else:
+                with TraceDict(model, HEADS + MLPS) as ret:
+                    output = model(
+                        input_ids, output_hidden_states=True, device_map="auto"
+                    )
+                head_wise_hidden_states = [
+                    ret[head].output.squeeze().detach().cpu() for head in HEADS
+                ]
+                head_wise_hidden_states = (
+                    torch.stack(head_wise_hidden_states, dim=0)
+                    .squeeze()
+                    .to(torch.float32)
+                    .numpy()
+                )
+                mlp_wise_hidden_states = [
+                    ret[mlp].output.squeeze().detach().cpu() for mlp in MLPS
+                ]
+                mlp_wise_hidden_states = (
+                    torch.stack(mlp_wise_hidden_states, dim=0)
+                    .squeeze()
+                    .to(torch.float32)
+                    .numpy()
+                )
+
+                mlp_layer_embeddings.append(mlp_wise_hidden_states[:, -1, :])
+                attention_head_embeddings.append(head_wise_hidden_states[:, -1, :])
+
+    return embed_generated, mlp_layer_embeddings, attention_head_embeddings
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=41)
@@ -501,6 +582,8 @@ def main():
                 k = _get_index_conclusion(predictions)
                 predictions = predictions[:k]
                 all_answers = all_answers[:k]
+            if len(predictions) == 0:
+                continue
             if args.use_rouge:
                 all_results, _, _ = compute_rouge_scores(predictions, all_answers)
             else:
@@ -514,78 +597,11 @@ def main():
         save_scores(args, gts)
     else:
         # Get the embeddings of the generated question and answers.
-        embed_generated = []
-        mlp_layer_embeddings = []
-        attention_head_embeddings = []
+        embed_generated, mlp_layer_embeddings, attention_head_embeddings = generate_embeddings(args, dataset, used_indices, length, model, tokenizer)
 
-        if args.model_name == "llama3-1-8B-instruct":
-            HEADS = [
-                f"model.layers.{i}.self_attn.o_proj"
-                for i in range(model.config.num_hidden_layers)
-            ]
-        else:
-            HEADS = [
-                f"model.layers.{i}.self_attn.head_out"
-                for i in range(model.config.num_hidden_layers)
-            ]
-        MLPS = [f"model.layers.{i}.mlp" for i in range(model.config.num_hidden_layers)]
-
-        for i in tqdm(
-            range(length),
-            desc=f"Generating features at feat_loc_svd={args.feat_loc_svd}",
-        ):
-            predictions = load_generated_answers(args, i)
-            prompts = generate_prompts(dataset, i, args.dataset_name, used_indices)
-            for j, pred in enumerate(predictions):
-                prompts[j] += f" {pred}"
-
-            input_ids = tokenizer(
-                prompts, return_tensors="pt", padding=True
-            ).input_ids.cuda()
-
-            with torch.no_grad():
-                if args.feat_loc_svd == 3:
-                    output = model(
-                        input_ids, output_hidden_states=True, device_map="auto"
-                    )
-
-                    hidden_states = output.hidden_states
-                    hidden_states = torch.stack(hidden_states, dim=0).squeeze()
-                    # get the hidden states of the last token
-                    hidden_states = (
-                        hidden_states.detach().to(torch.float32).cpu().numpy()[:, -1, :]
-                    )
-                    embed_generated.append(hidden_states)
-                else:
-                    with TraceDict(model, HEADS + MLPS) as ret:
-                        output = model(
-                            input_ids, output_hidden_states=True, device_map="auto"
-                        )
-                    head_wise_hidden_states = [
-                        ret[head].output.squeeze().detach().cpu() for head in HEADS
-                    ]
-                    head_wise_hidden_states = (
-                        torch.stack(head_wise_hidden_states, dim=0)
-                        .squeeze()
-                        .to(torch.float32)
-                        .numpy()
-                    )
-                    mlp_wise_hidden_states = [
-                        ret[mlp].output.squeeze().detach().cpu() for mlp in MLPS
-                    ]
-                    mlp_wise_hidden_states = (
-                        torch.stack(mlp_wise_hidden_states, dim=0)
-                        .squeeze()
-                        .to(torch.float32)
-                        .numpy()
-                    )
-
-                    mlp_layer_embeddings.append(mlp_wise_hidden_states[:, -1, :])
-                    attention_head_embeddings.append(head_wise_hidden_states[:, -1, :])
         if args.feat_loc_svd == 3:
-            embed_generated = np.asarray(
-                np.stack(embed_generated), dtype=np.float32
-            )  # (num_preds, num_layers, hidden_size)
+            embed_generated = np.concatenate(embed_generated, axis=1).astype(np.float32)  # [33, num_preds, 4096]
+            embed_generated = np.transpose(embed_generated, (1, 0, 2))              # [num_preds, 33, 4096]
 
             np.save(
                 f"save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_layer_wise.npy",
@@ -608,23 +624,6 @@ def main():
                 mlp_layer_embeddings,
             )
 
-        # Get the split and label (true or false) of the unlabeled data and the test data.
-        score_type = "rouge" if args.use_rouge else "bleurt"
-        prefix = "ml" if args.most_likely else "bg"
-        score_file = f"./{prefix}_{args.dataset_name}_{score_type}_score.npy"
-
-        scores = np.load(score_file)
-        thres = args.thres_gt
-        gt_label = np.asarray(scores > thres, dtype=np.int32)
-
-        (
-            gt_label_test,
-            gt_label_wild,
-            gt_label_val,
-            wild_q_indices,
-            wild_q_indices_train,
-            wild_q_indices_val,
-        ) = split_indices_and_labels(length, args.wild_ratio, gt_label)
 
         feat_loc = args.feat_loc_svd
 
@@ -633,19 +632,39 @@ def main():
                 embed_generated = np.load(
                     f"save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_layer_wise.npy",
                     allow_pickle=True,
-                )
+                ).astype(np.float32)
             elif feat_loc == 2:
                 embed_generated = np.load(
                     f"save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_mlp_wise.npy",
                     allow_pickle=True,
-                )
+                ).astype(np.float32)
             else:
                 embed_generated = np.load(
                     f"save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_head_wise.npy",
                     allow_pickle=True,
-                )
+                ).astype(np.float32)
         else:
             raise NotImplementedError("Batch generation is not implemented yet.")
+
+        # Get the split and label (true or false) of the unlabeled data and the test data.
+        score_type = "rouge" if args.use_rouge else "bleurt"
+        prefix = "ml" if args.most_likely else "bg"
+        score_file = f"./{prefix}_{args.dataset_name}_{score_type}_score.npy"
+
+        scores = np.load(score_file)
+        thres = args.thres_gt
+        gt_label = np.asarray(scores > thres, dtype=np.int32)
+        print("Num positive samples: ", np.sum(gt_label == 1))
+        print("Num negative samples: ", np.sum(gt_label == 0))
+
+        (
+            gt_label_test,
+            gt_label_wild,
+            gt_label_val,
+            wild_q_indices,
+            wild_q_indices_train,
+            wild_q_indices_val,
+        ) = split_indices_and_labels(embed_generated.shape[0], args.wild_ratio, gt_label)
 
         embed_generated_wild, embed_generated_eval, embed_generated_test = (
             get_embed_generated_split(
