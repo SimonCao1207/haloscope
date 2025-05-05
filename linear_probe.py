@@ -270,7 +270,7 @@ def get_linear_acc(
     epochs=10,
     args=None,
     classifier=None,
-    print_ret=True,
+    print_ret=False,
     normed=False,
     nonlinear=False,
     learning_rate=5,
@@ -337,6 +337,10 @@ def get_linear_acc(
             epoch,
             print_freq=opt.print_freq,
         )
+        if print_ret:
+            print(
+                "Epoch {}: train loss {:.4f} acc {:.4f}".format(epoch, loss_train, acc)
+            )
 
         # eval for one epoch
         loss, val_acc, preds, labels_out = validate(

@@ -402,9 +402,9 @@ def save_generated_answers(
     np.save(file_path, answers)
 
 
-def load_generated_answers(args, i):
+def load_generated_answers(args, i, inference_type="eval"):
     prefix = "most_likely" if args.most_likely else "batch_generations"
-    file_path = f"./save_for_eval/{args.dataset_name}_hal_det/answers/{prefix}_hal_det_{args.model_name}_{args.dataset_name}_answers_index_{i}.npy"
+    file_path = f"./save_for_{inference_type}/{args.dataset_name}_hal_det/answers/{prefix}_hal_det_{args.model_name}_{args.dataset_name}_answers_index_{i}.npy"
     return np.load(file_path)
 
 
@@ -481,7 +481,7 @@ def generate_embeddings(
         range(length),
         desc=f"Generating features at feat_loc_svd={args.feat_loc_svd}",
     ):
-        predictions = load_generated_answers(args, i)
+        predictions = load_generated_answers(args, i, inference_type=inference_type)
         predictions = post_process(predictions, args)
         k = len(predictions)
         if args.dataset_name == "2wikimultihopqa":

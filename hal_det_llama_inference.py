@@ -20,6 +20,7 @@ from hal_det_llama import (
     save_generated_answers,
     seed_everything,
 )
+from linear_probe import NonLinearClassifier
 from metric_utils import get_measures
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -32,11 +33,12 @@ def main():
     parser.add_argument("--local", type=int, default=0)
     parser.add_argument("--dataset_name", type=str, default="2wikimultihopqa")
     parser.add_argument("--fewshots", type=int, default=6)
+    parser.add_argument("--feat_loc_svd", type=int, default=3)
     parser.add_argument("--num_gene", type=int, default=1)
     parser.add_argument("--gene", type=int, default=0)
     parser.add_argument("--most_likely", type=int, default=1)
     parser.add_argument("--generate_gt", type=int, default=0)
-    parser.add_argument("--thres_gt", type=float, default=0.73)
+    parser.add_argument("--thres_gt", type=float, default=0.5)
     parser.add_argument(
         "--regenerate_embed",
         action="store_true",
@@ -91,7 +93,9 @@ def main():
         gts = np.zeros(0)
         for i in tqdm(range(len(dataset)), desc="Generating ground truth"):
             all_answers = get_correct_answers(dataset, i, args.dataset_name, None)
-            predictions = load_generated_answers(args, i)
+            predictions = load_generated_answers(args, i, inference_type="test")
+            if not isinstance(predictions, list):
+                predictions = list(predictions)
             predictions = post_process(predictions, args)
             if args.dataset_name == "2wikimultihopqa":
                 k = _get_index_conclusion(predictions)
@@ -103,7 +107,7 @@ def main():
                 args, model, tokenizer, predictions, all_answers
             )
             if args.dataset_name == "2wikimultihopqa":
-                gts = np.concatenate([gts, all_results.diagonal()], 0)
+                gts = np.concatenate([gts, all_results], 0)
             else:
                 gts = np.concatenate([gts, np.max(all_results, axis=0)], 0)
         file_path = f"./save_for_test/ml_{args.dataset_name}_bleurt_score.npy"
@@ -127,17 +131,21 @@ def main():
             ).astype(np.float32)
 
         # Get the split and label (true or false) of the unlabeled data and the test data.
-        score_file = f"./save_for_test/ml_{args.dataset_name}_bluert_score.npy"
+        score_file = f"./save_for_test/ml_{args.dataset_name}_bleurt_score.npy"
 
         scores = np.load(score_file)
         thres = args.thres_gt
         gt_label = np.asarray(scores > thres, dtype=np.int32)
         assert len(gt_label) == embed_generated.shape[0]
 
+        logging.info(f"Num truthful samples: {np.sum(gt_label == 1)}")
+        logging.info(f"Num hallucinated samples: {np.sum(gt_label == 0)}")
+
         logging.info("Inference the test set")
         checkpoint_dir = "./checkpoints"
         checkpoint_path = os.path.join(checkpoint_dir, "clf_model.pth")
-        clf = torch.load(checkpoint_path)
+        clf = NonLinearClassifier(embed_generated.shape[2], num_classes=2).cuda()
+        clf.load_state_dict(torch.load(checkpoint_path))
 
         layer = 14
 
