@@ -1,4 +1,5 @@
 import argparse
+import logging
 import os
 from typing import List
 
@@ -16,6 +17,8 @@ from data.wmqa import get_top_sentence
 from linear_probe import get_linear_acc
 from metric_utils import get_measures, print_measures
 from prepare_data import load_dataset_by_name
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
 def seed_everything(seed: int):
@@ -443,6 +446,7 @@ def _get_index_conclusion(predictions):
 
 
 def generate_embeddings(args, dataset, used_indices, length, model, tokenizer):
+    logging.info("Generating embeddings...")
     last_token_hidden_state = []
     mlp_layer_embeddings = []
     attention_head_embeddings = []
@@ -555,6 +559,7 @@ def generate_embeddings(args, dataset, used_indices, length, model, tokenizer):
 
 
 def load_embeddings(args):
+    logging.info("Loading embeddings from local...")
     if args.most_likely:
         if args.feat_loc_svd == 3:
             embed_generated = np.load(
@@ -594,8 +599,7 @@ def main():
     parser.add_argument("--most_likely", type=int, default=0)
     parser.add_argument(
         "--regenerate_embed",
-        type=bool,
-        default=True,
+        action="store_true",
         help="Whether to regenerate embeddings or load pre-existing one from local",
     )
 
@@ -688,10 +692,10 @@ def main():
             wild_q_indices_val,
         ) = split_indices_and_labels(len(gt_label), args.wild_ratio, gt_label)
 
-        print(
+        logging.info(
             f"Num truthful samples: {np.sum(gt_label == 1)} (test: {np.sum(gt_label_test == 1)}, val: {np.sum(gt_label_val == 1)})"
         )
-        print(
+        logging.info(
             f"Num hallucinated samples: {np.sum(gt_label == 0)} (test: {np.sum(gt_label_test == 0)}, val: {np.sum(gt_label_val == 0)})"
         )
 
@@ -712,15 +716,20 @@ def main():
         returned_results = svd_embed_score(
             embed_generated_eval,
             gt_label_val,
-            1,
-            11,
+            begin_k=1,
+            k_span=11,
             mean=0,
             svd=0,
             weight=args.weighted_svd,
         )
+        best_k, best_layer, best_sign = (
+            returned_results["k"],
+            returned_results["best_layer"],
+            returned_results["best_sign"],
+        )
 
-        pca_model = PCA(n_components=returned_results["k"], whiten=False).fit(
-            embed_generated_wild[:, returned_results["best_layer"], :]
+        pca_model = PCA(n_components=best_k, whiten=False).fit(
+            embed_generated_wild[:, best_layer, :]
         )
         projection = pca_model.components_.T
         if args.weighted_svd:
@@ -733,15 +742,11 @@ def main():
             keepdims=True,
         )
         assert scores.shape[1] == 1
-        best_scores = (
-            np.sqrt(np.sum(np.square(scores), axis=1)) * returned_results["best_sign"]
-        )
+        best_scores = np.sqrt(np.sum(np.square(scores), axis=1)) * best_sign
 
         # Direct projection
         test_scores = np.mean(
-            np.matmul(
-                embed_generated_test[:, returned_results["best_layer"], :], projection
-            ),
+            np.matmul(embed_generated_test[:, best_layer, :], projection),
             -1,
             keepdims=True,
         )
