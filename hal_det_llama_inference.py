@@ -129,11 +129,11 @@ def main():
             k = _get_index_conclusion(trim_preds)
             exclude_conclusion_predictions = trim_preds[:k]
 
-            for i in range(len(exclude_conclusion_predictions)):
+            for j in range(len(exclude_conclusion_predictions)):
                 flare_score = cal_flare_score(
-                    exclude_conclusion_predictions[i],
-                    tokens_batch[i],
-                    logprobs_batch[i],
+                    exclude_conclusion_predictions[j],
+                    tokens_batch[j],
+                    logprobs_batch[j],
                 )
                 flare_scores.append(flare_score)
 
@@ -167,10 +167,7 @@ def main():
             all_results = compute_bleurt_scores(
                 args, model, tokenizer, predictions, all_answers
             )
-            if args.dataset_name == "2wikimultihopqa":
-                gts = np.concatenate([gts, all_results], 0)
-            else:
-                gts = np.concatenate([gts, np.max(all_results, axis=0)], 0)
+            gts = np.concatenate([gts, all_results], 0)
         file_path = f"./save_for_test/ml_{args.dataset_name}_bleurt_score.npy"
         np.save(file_path, gts)
     else:
@@ -221,12 +218,12 @@ def main():
         halo_measures = get_measures(
             pca_wild_score_binary_cls[gt_label == 1],
             pca_wild_score_binary_cls[gt_label == 0],
-            plot=False,
+            plot=True,
         )
         flare_measures = get_measures(
             flare_scores[gt_label == 1],
             flare_scores[gt_label == 0],
-            plot=False,
+            plot=True,
         )
         print("Haloscope AUROC: ", halo_measures[0])
         print("Flare AUROC: ", flare_measures[0])
