@@ -338,23 +338,33 @@ def compute_rouge_scores(predictions, all_answers):
     return all_results, all_results1, all_results2
 
 
-def compute_bleurt_scores(model, tokenizer, predictions, all_answers):
+def compute_bleurt_scores(args, model, tokenizer, predictions, all_answers):
     """Compute BLEURT scores for predictions against all answers."""
-    num_answers, num_predictions = len(all_answers), len(predictions)
-    all_results = np.zeros((num_answers, num_predictions))
-
-    with torch.no_grad():
-        for anw in range(num_answers):
+    if args.dataset_name == "2wikimultihopqa":
+        with torch.no_grad():
             inputs = tokenizer(
-                predictions,
-                [all_answers[anw]] * num_predictions,
-                padding="longest",
-                return_tensors="pt",
+                all_answers, predictions, padding="longest", return_tensors="pt"
             )
             for key in inputs.keys():
                 inputs[key] = inputs[key].cuda()
-            res = np.asarray(model(**inputs).logits.flatten().tolist())
-            all_results[anw] = res
+            res = model(**inputs).logits.flatten().tolist()
+        return res
+    else:
+        num_answers, num_predictions = len(all_answers), len(predictions)
+        all_results = np.zeros((num_answers, num_predictions))
+
+        with torch.no_grad():
+            for anw in range(num_answers):
+                inputs = tokenizer(
+                    predictions,
+                    [all_answers[anw]] * num_predictions,
+                    padding="longest",
+                    return_tensors="pt",
+                )
+                for key in inputs.keys():
+                    inputs[key] = inputs[key].cuda()
+                res = np.asarray(model(**inputs).logits.flatten().tolist())
+                all_results[anw] = res
 
     return all_results
 
@@ -383,10 +393,12 @@ def get_correct_answers(dataset, i, dataset_name, used_indices=None):
     return all_answers
 
 
-def save_generated_answers(dataset_name, model_name, answers, i, most_likely):
+def save_generated_answers(
+    dataset_name, model_name, answers, i, most_likely, inference_type="eval"
+):
     """Save generated answers to a file."""
     info = "most_likely_" if most_likely else "batch_generations_"
-    file_path = f"./save_for_eval/{dataset_name}_hal_det/answers/{info}hal_det_{model_name}_{dataset_name}_answers_index_{i}.npy"
+    file_path = f"./save_for_{inference_type}/{dataset_name}_hal_det/answers/{info}hal_det_{model_name}_{dataset_name}_answers_index_{i}.npy"
     np.save(file_path, answers)
 
 
@@ -445,7 +457,9 @@ def _get_index_conclusion(predictions):
     return -1
 
 
-def generate_embeddings(args, dataset, used_indices, length, model, tokenizer):
+def generate_embeddings(
+    args, dataset, used_indices, length, model, tokenizer, inference_type="eval"
+):
     logging.info("Generating embeddings...")
     last_token_hidden_state = []
     mlp_layer_embeddings = []
@@ -533,7 +547,7 @@ def generate_embeddings(args, dataset, used_indices, length, model, tokenizer):
         )  # [num_preds, 33, 4096]
 
         np.save(
-            f"save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_layer_wise.npy",
+            f"save_for_{inference_type}/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_layer_wise.npy",
             last_token_hidden_state,
         )
         return last_token_hidden_state
@@ -542,7 +556,7 @@ def generate_embeddings(args, dataset, used_indices, length, model, tokenizer):
             np.stack(mlp_layer_embeddings), dtype=np.float32
         )
         np.save(
-            f"save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_embeddings_mlp_wise.npy",
+            f"save_for_{inference_type}/{args.dataset_name}_hal_det/most_likely_{args.model_name}_embeddings_mlp_wise.npy",
             mlp_layer_embeddings,
         )
         return mlp_layer_embeddings
@@ -552,7 +566,7 @@ def generate_embeddings(args, dataset, used_indices, length, model, tokenizer):
         )
 
         np.save(
-            f"save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_head_wise.npy",
+            f"save_for_{inference_type}/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_head_wise.npy",
             attention_head_embeddings,
         )
         return attention_head_embeddings
@@ -614,11 +628,11 @@ def main():
     length = len(used_indices) if used_indices is not None else len(dataset)
 
     if args.gene:
-        if not os.path.exists(f"./save_for_eval/{args.dataset_name}_hal_det/"):
-            os.mkdir(f"./save_for_eval/{args.dataset_name}_hal_det/")
-
-        if not os.path.exists(f"./save_for_eval/{args.dataset_name}_hal_det/answers"):
-            os.mkdir(f"./save_for_eval/{args.dataset_name}_hal_det/answers")
+        os.makedirs("./save_for_eval", exist_ok=True)
+        os.makedirs(f"./save_for_eval/{args.dataset_name}_hal_det", exist_ok=True)
+        os.makedirs(
+            f"./save_for_eval/{args.dataset_name}_hal_det/answers", exist_ok=True
+        )
 
         for i in tqdm(range(0, length), desc="Generating answers"):
             prompts = generate_prompts(dataset, i, args.dataset_name, used_indices)
@@ -645,6 +659,8 @@ def main():
                 dataset, i, args.dataset_name, used_indices
             )
             predictions = load_generated_answers(args, i)
+            if not isinstance(predictions, list):
+                predictions = list(predictions)
             predictions = post_process(predictions, args)
             if args.dataset_name == "2wikimultihopqa":
                 k = _get_index_conclusion(predictions)
@@ -656,10 +672,10 @@ def main():
                 all_results, _, _ = compute_rouge_scores(predictions, all_answers)
             else:
                 all_results = compute_bleurt_scores(
-                    model, tokenizer, predictions, all_answers
+                    args, model, tokenizer, predictions, all_answers
                 )
             if args.dataset_name == "2wikimultihopqa":
-                gts = np.concatenate([gts, all_results.diagonal()], 0)
+                gts = np.concatenate([gts, all_results], 0)
             else:
                 gts = np.concatenate([gts, np.max(all_results, axis=0)], 0)
         save_scores(args, gts)
@@ -761,9 +777,6 @@ def main():
 
         logging.info("Get the best threshold on the eval set")
         thresholds = np.linspace(0, 1, num=40)[1:-1]
-        normalizer = lambda x: x / (
-            np.linalg.norm(x, ord=2, axis=-1, keepdims=True) + 1e-10
-        )
         auroc_over_thres = []
         best_layer_over_thres = []
         for thres_wild in thresholds:
@@ -788,7 +801,6 @@ def main():
                 # embed_train = embed_generated_wild[:,layer,:]
                 # label_train = gt_label_wild
                 ## gt training, saplma
-                logging.info("Training linear classifier...")
                 (
                     best_acc,
                     final_acc,
@@ -801,7 +813,6 @@ def main():
                     label_train,
                     2,
                     epochs=50,
-                    print_ret=True,
                     batch_size=512,
                     cosine=True,
                     nonlinear=True,
@@ -840,14 +851,12 @@ def main():
         argmax_index = max(
             range(len(auroc_over_thres)), key=auroc_over_thres.__getitem__
         )
-        print(
-            "the best threshold calculated on the eval set is: ",
+        logging.info(
+            "The best threshold calculated on the eval set is: %f, best layer is: %d",
             thresholds[argmax_index],
-            "best layer is: ",
             best_layer_over_thres[argmax_index],
         )
 
-        # Get the result on the test set
         thres_wild_score = np.sort(best_scores)[
             int(len(best_scores) * thresholds[argmax_index])
         ]
@@ -882,6 +891,13 @@ def main():
             learning_rate=0.05,
             weight_decay=0.0003,
         )
+
+        # Save the trained model to a checkpoint folder
+        checkpoint_dir = "./checkpoints"
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        checkpoint_path = os.path.join(checkpoint_dir, "clf_model.pth")
+        torch.save(clf.state_dict(), checkpoint_path)
+        logging.info(f"Model saved to {checkpoint_path}")
 
         clf.eval()
         output = clf(

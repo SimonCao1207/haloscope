@@ -8,5 +8,5 @@ python hal_det_llama.py \
     --weighted_svd 1 \
     --feat_loc_svd 3 \
     --regenerate_emb \
-    --thres_gt=0.7 \
+    --thres_gt 0.73 \
     --fewshots 6

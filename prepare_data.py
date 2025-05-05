@@ -49,7 +49,7 @@ def load_dataset_by_name(args):
         dataset = load_coqa_dataset(model)
         return dataset, None
     elif args.dataset_name == "2wikimultihopqa":
-        path = "./data/2WMQA_cot.jsonl"
+        path = "./data/2WMQA_cot_train.jsonl"
         data = WikiMultiHopQA(path)
         data.format(fewshot=args.fewshots)
         dataset = data.dataset
