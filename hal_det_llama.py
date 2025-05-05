@@ -712,7 +712,7 @@ def main():
         # returned_results = svd_embed_score(embed_generated_wild, gt_label_wild,
         #                                    1, 11, mean=0, svd=0, weight=args.weighted_svd)
 
-        # Get the best hyper-parameters on validation set
+        logging.info("Get the best hyper-parameters (k, layer) on validation set")
         returned_results = svd_embed_score(
             embed_generated_eval,
             gt_label_val,
@@ -722,31 +722,29 @@ def main():
             svd=0,
             weight=args.weighted_svd,
         )
-        best_k, best_layer, best_sign = (
+        best_k_on_val, best_layer_on_val, best_sign_on_val = (
             returned_results["k"],
             returned_results["best_layer"],
             returned_results["best_sign"],
         )
 
-        pca_model = PCA(n_components=best_k, whiten=False).fit(
-            embed_generated_wild[:, best_layer, :]
+        pca_model = PCA(n_components=best_k_on_val, whiten=False).fit(
+            embed_generated_wild[:, best_layer_on_val, :]
         )
         projection = pca_model.components_.T
         if args.weighted_svd:
             projection = pca_model.singular_values_ * projection
         scores = np.mean(
-            np.matmul(
-                embed_generated_wild[:, returned_results["best_layer"], :], projection
-            ),
+            np.matmul(embed_generated_wild[:, best_layer_on_val, :], projection),
             -1,
             keepdims=True,
         )
         assert scores.shape[1] == 1
-        best_scores = np.sqrt(np.sum(np.square(scores), axis=1)) * best_sign
+        best_scores = np.sqrt(np.sum(np.square(scores), axis=1)) * best_sign_on_val
 
         # Direct projection
         test_scores = np.mean(
-            np.matmul(embed_generated_test[:, best_layer, :], projection),
+            np.matmul(embed_generated_test[:, best_layer_on_val, :], projection),
             -1,
             keepdims=True,
         )
@@ -755,13 +753,13 @@ def main():
         test_scores = np.sqrt(np.sum(np.square(test_scores), axis=1))
 
         measures = get_measures(
-            returned_results["best_sign"] * test_scores[gt_label_test == 1],
-            returned_results["best_sign"] * test_scores[gt_label_test == 0],
+            best_sign_on_val * test_scores[gt_label_test == 1],
+            best_sign_on_val * test_scores[gt_label_test == 0],
             plot=False,
         )
         print_measures(measures[0], measures[1], measures[2], "direct-projection")
 
-        # Train a linear classifier on the train set and get the best threshold when evaluating on the eval set
+        logging.info("Get the best threshold on the eval set")
         thresholds = np.linspace(0, 1, num=40)[1:-1]
         normalizer = lambda x: x / (
             np.linalg.norm(x, ord=2, axis=-1, keepdims=True) + 1e-10
@@ -790,7 +788,7 @@ def main():
                 # embed_train = embed_generated_wild[:,layer,:]
                 # label_train = gt_label_wild
                 ## gt training, saplma
-
+                logging.info("Training linear classifier...")
                 (
                     best_acc,
                     final_acc,
@@ -827,17 +825,17 @@ def main():
                 if measures[0] > best_auroc:
                     best_auroc = measures[0]
                     best_result = [100 * measures[0]]
-                    best_layer = layer
+                    best_layer_on_val = layer
 
             auroc_over_thres.append(best_auroc)
-            best_layer_over_thres.append(best_layer)
+            best_layer_over_thres.append(best_layer_on_val)
             print(
                 "thres: ",
                 thres_wild,
                 "best result: ",
                 best_result,
                 "best_layer: ",
-                best_layer,
+                best_layer_on_val,
             )
         argmax_index = max(
             range(len(auroc_over_thres)), key=auroc_over_thres.__getitem__
