@@ -177,16 +177,21 @@ def svd_embed_score(
     }
 
 
-def _generate_prompt(dataset, i):
+def _generate_prompt(dataset, i, add_fewshots=True):
     demo, case = dataset[i]["demo"], dataset[i]["case"]
     exemplars = "".join([d["case"] + "\n" for d in demo])
-    prompt_text = exemplars
-    prompt_text += 'Answer in the same format as before. Please ensure that the final sentence of the answer starts with "So the answer is".\n'
+    if add_fewshots:
+        prompt_text = exemplars
+        prompt_text += 'Answer in the same format as before. Please ensure that the final sentence of the answer starts with "So the answer is".\n'
+    else:
+        prompt_text = ""
     prompt_text += case
     return prompt_text
 
 
-def generate_prompts(dataset, i, dataset_name, used_indices=None) -> List[str]:
+def generate_prompts(
+    dataset, i, dataset_name, used_indices=None, add_fewshots=True
+) -> List[str]:
     """Generate the appropriate prompt based on the dataset type."""
     if dataset_name == "tydiqa" and used_indices is not None:
         question = dataset[int(used_indices[i])]["question"]
@@ -200,7 +205,7 @@ def generate_prompts(dataset, i, dataset_name, used_indices=None) -> List[str]:
     elif dataset_name == "2wikimultihopqa":
         all_answers = dataset[i]["all_answers"]
         prompts = []
-        prefix = _generate_prompt(dataset, i)
+        prefix = _generate_prompt(dataset, i, add_fewshots=add_fewshots)
         prompts.append(prefix)
         for j in range(1, len(all_answers)):
             prompts.append(f"{prefix} {' '.join(all_answers[:j])}")
@@ -338,7 +343,7 @@ def compute_bleurt_scores(model, tokenizer, predictions, all_answers):
     with torch.no_grad():
         for anw in range(num_answers):
             inputs = tokenizer(
-                predictions.tolist(),
+                predictions,
                 [all_answers[anw]] * num_predictions,
                 padding="longest",
                 return_tensors="pt",
@@ -438,7 +443,7 @@ def _get_index_conclusion(predictions):
 
 
 def generate_embeddings(args, dataset, used_indices, length, model, tokenizer):
-    embed_generated = []
+    last_token_hidden_state = []
     mlp_layer_embeddings = []
     attention_head_embeddings = []
 
@@ -466,7 +471,9 @@ def generate_embeddings(args, dataset, used_indices, length, model, tokenizer):
             predictions = predictions[:k]
         if len(predictions) == 0:
             continue
-        prompts = generate_prompts(dataset, i, args.dataset_name, used_indices)
+        prompts = generate_prompts(
+            dataset, i, args.dataset_name, used_indices, add_fewshots=False
+        )
         prompts = prompts[:k]
         for j, pred in enumerate(predictions):
             prompts[j] += f" {pred}"
@@ -477,9 +484,7 @@ def generate_embeddings(args, dataset, used_indices, length, model, tokenizer):
 
         with torch.no_grad():
             if args.feat_loc_svd == 3:
-                output = model(
-                    input_ids, output_hidden_states=True, device_map="auto"
-                )
+                output = model(input_ids, output_hidden_states=True, device_map="auto")
 
                 hidden_states = output.hidden_states
                 hidden_states = torch.stack(hidden_states, dim=0)
@@ -487,7 +492,7 @@ def generate_embeddings(args, dataset, used_indices, length, model, tokenizer):
                 hidden_states = (
                     hidden_states.detach().to(torch.float32).cpu().numpy()[..., -1, :]
                 )
-                embed_generated.append(hidden_states)
+                last_token_hidden_state.append(hidden_states)
             else:
                 with TraceDict(model, HEADS + MLPS) as ret:
                     output = model(
@@ -515,7 +520,60 @@ def generate_embeddings(args, dataset, used_indices, length, model, tokenizer):
                 mlp_layer_embeddings.append(mlp_wise_hidden_states[:, -1, :])
                 attention_head_embeddings.append(head_wise_hidden_states[:, -1, :])
 
-    return embed_generated, mlp_layer_embeddings, attention_head_embeddings
+    if args.feat_loc_svd == 3:
+        last_token_hidden_state = np.concatenate(
+            last_token_hidden_state, axis=1
+        ).astype(np.float32)  # [33, num_preds, 4096]
+        last_token_hidden_state = np.transpose(
+            last_token_hidden_state, (1, 0, 2)
+        )  # [num_preds, 33, 4096]
+
+        np.save(
+            f"save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_layer_wise.npy",
+            last_token_hidden_state,
+        )
+        return last_token_hidden_state
+    elif args.feat_loc_svd == 2:
+        mlp_layer_embeddings = np.asarray(
+            np.stack(mlp_layer_embeddings), dtype=np.float32
+        )
+        np.save(
+            f"save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_embeddings_mlp_wise.npy",
+            mlp_layer_embeddings,
+        )
+        return mlp_layer_embeddings
+    else:
+        attention_head_embeddings = np.asarray(
+            np.stack(attention_head_embeddings), dtype=np.float32
+        )
+
+        np.save(
+            f"save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_head_wise.npy",
+            attention_head_embeddings,
+        )
+        return attention_head_embeddings
+
+
+def load_embeddings(args):
+    if args.most_likely:
+        if args.feat_loc_svd == 3:
+            embed_generated = np.load(
+                f"save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_layer_wise.npy",
+                allow_pickle=True,
+            ).astype(np.float32)
+        elif args.feat_loc_svd == 2:
+            embed_generated = np.load(
+                f"save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_mlp_wise.npy",
+                allow_pickle=True,
+            ).astype(np.float32)
+        else:
+            embed_generated = np.load(
+                f"save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_head_wise.npy",
+                allow_pickle=True,
+            ).astype(np.float32)
+    else:
+        raise NotImplementedError("Batch generation is not implemented yet.")
+    return embed_generated
 
 
 def main():
@@ -534,6 +592,12 @@ def main():
     parser.add_argument("--wild_ratio", type=float, default=0.75)
     parser.add_argument("--thres_gt", type=float, default=0.5)
     parser.add_argument("--most_likely", type=int, default=0)
+    parser.add_argument(
+        "--regenerate_embed",
+        type=bool,
+        default=True,
+        help="Whether to regenerate embeddings or load pre-existing one from local",
+    )
 
     parser.add_argument(
         "--model_dir", type=str, default=None, help="local directory with model data"
@@ -597,54 +661,13 @@ def main():
         save_scores(args, gts)
     else:
         # Get the embeddings of the generated question and answers.
-        embed_generated, mlp_layer_embeddings, attention_head_embeddings = generate_embeddings(args, dataset, used_indices, length, model, tokenizer)
-
-        if args.feat_loc_svd == 3:
-            embed_generated = np.concatenate(embed_generated, axis=1).astype(np.float32)  # [33, num_preds, 4096]
-            embed_generated = np.transpose(embed_generated, (1, 0, 2))              # [num_preds, 33, 4096]
-
-            np.save(
-                f"save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_layer_wise.npy",
-                embed_generated,
+        if args.regenerate_embed:
+            embed_generated = generate_embeddings(
+                args, dataset, used_indices, length, model, tokenizer
             )
+
         else:
-            mlp_layer_embeddings = np.asarray(
-                np.stack(mlp_layer_embeddings), dtype=np.float32
-            )
-            attention_head_embeddings = np.asarray(
-                np.stack(attention_head_embeddings), dtype=np.float32
-            )
-
-            np.save(
-                f"save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_head_wise.npy",
-                attention_head_embeddings,
-            )
-            np.save(
-                f"save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_embeddings_mlp_wise.npy",
-                mlp_layer_embeddings,
-            )
-
-
-        feat_loc = args.feat_loc_svd
-
-        if args.most_likely:
-            if feat_loc == 3:
-                embed_generated = np.load(
-                    f"save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_layer_wise.npy",
-                    allow_pickle=True,
-                ).astype(np.float32)
-            elif feat_loc == 2:
-                embed_generated = np.load(
-                    f"save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_mlp_wise.npy",
-                    allow_pickle=True,
-                ).astype(np.float32)
-            else:
-                embed_generated = np.load(
-                    f"save_for_eval/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_head_wise.npy",
-                    allow_pickle=True,
-                ).astype(np.float32)
-        else:
-            raise NotImplementedError("Batch generation is not implemented yet.")
+            embed_generated = load_embeddings(args)
 
         # Get the split and label (true or false) of the unlabeled data and the test data.
         score_type = "rouge" if args.use_rouge else "bleurt"
@@ -654,8 +677,7 @@ def main():
         scores = np.load(score_file)
         thres = args.thres_gt
         gt_label = np.asarray(scores > thres, dtype=np.int32)
-        print("Num positive samples: ", np.sum(gt_label == 1))
-        print("Num negative samples: ", np.sum(gt_label == 0))
+        assert len(gt_label) == embed_generated.shape[0]
 
         (
             gt_label_test,
@@ -664,12 +686,19 @@ def main():
             wild_q_indices,
             wild_q_indices_train,
             wild_q_indices_val,
-        ) = split_indices_and_labels(embed_generated.shape[0], args.wild_ratio, gt_label)
+        ) = split_indices_and_labels(len(gt_label), args.wild_ratio, gt_label)
+
+        print(
+            f"Num truthful samples: {np.sum(gt_label == 1)} (test: {np.sum(gt_label_test == 1)}, val: {np.sum(gt_label_val == 1)})"
+        )
+        print(
+            f"Num hallucinated samples: {np.sum(gt_label == 0)} (test: {np.sum(gt_label_test == 0)}, val: {np.sum(gt_label_val == 0)})"
+        )
 
         embed_generated_wild, embed_generated_eval, embed_generated_test = (
             get_embed_generated_split(
                 embed_generated,
-                feat_loc,
+                args.feat_loc_svd,
                 wild_q_indices,
                 wild_q_indices_train,
                 wild_q_indices_val,
