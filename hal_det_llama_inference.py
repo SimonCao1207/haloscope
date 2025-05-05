@@ -1,21 +1,23 @@
 import argparse
 import logging
 import os
+import pickle
+from math import exp
 
 import numpy as np
 import torch
 from tqdm import tqdm
 
-from data.wmqa import WikiMultiHopQA
+from data.wmqa import WikiMultiHopQA, get_top_sentence
+from generator import BasicGenerator
 from hal_det_llama import (
+    HF_NAMES,
     _get_index_conclusion,
     compute_bleurt_scores,
-    generate_answers,
     generate_embeddings,
     generate_prompts,
     get_correct_answers,
     load_generated_answers,
-    load_model,
     post_process,
     save_generated_answers,
     seed_everything,
@@ -24,6 +26,50 @@ from linear_probe import NonLinearClassifier
 from metric_utils import get_measures
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+
+def find_token_range_for_sentence(sentence, tokens, start_index):
+    """Helper function to find which tokens belong to a sentence."""
+    position = 0
+    token_range = start_index
+
+    while token_range < len(tokens):
+        # Find the current token in the remaining part of the sentence
+        token_position = sentence[position:].find(tokens[token_range].strip())
+        if token_position == -1:
+            break
+
+        # Move past this token in the sentence
+        position += token_position + len(tokens[token_range].strip())
+        token_range += 1
+
+    return token_range
+
+
+def cal_flare_score(text, tokens, logprobs):
+    """
+    Return confidence score for text.
+    """
+    sentence = get_top_sentence(text)
+    token_index = 0
+
+    if (
+        "the answer is" in sentence.lower()
+        or "thus" in sentence.lower()
+        or "therefore" in sentence.lower()
+    ):
+        return 1
+
+    # Find which tokens belong to the current sentence
+    sentence_token_range = find_token_range_for_sentence(sentence, tokens, token_index)
+    assert sentence_token_range != token_index
+
+    # Calculate probabilities for all tokens in the sentence
+    token_probabilities = np.array(
+        [exp(v) for v in logprobs[token_index:sentence_token_range]]
+    )
+
+    return np.min(token_probabilities)
 
 
 def main():
@@ -57,29 +103,40 @@ def main():
     data.format(fewshot=args.fewshots)
     dataset = data.dataset
 
-    model, tokenizer = load_model(args)
+    model_name = HF_NAMES[args.model_name]
+    generator = BasicGenerator(model_name)
+    model, tokenizer = generator.model, generator.tokenizer
     os.makedirs("./save_for_test", exist_ok=True)
     if args.gene:
         os.makedirs(f"./save_for_test/{args.dataset_name}_hal_det/", exist_ok=True)
         os.makedirs(
             f"./save_for_test/{args.dataset_name}_hal_det/answers", exist_ok=True
         )
-
+        flare_scores = []
         for i in tqdm(range(0, len(dataset)), desc="Generating answers"):
             prompts = generate_prompts(
                 dataset, i, args.dataset_name, None, add_fewshots=True
             )
-            input_ids = tokenizer(
-                prompts, return_tensors="pt", padding=True
-            ).input_ids.cuda()
-            predictions = generate_answers(
-                model,
-                tokenizer,
-                args.dataset_name,
-                input_ids,
-                args.num_gene,
-                args.most_likely,
+            return_dict = generator.generate(
+                prompts,
+                64,
+                return_logprobs=True,
             )
+            predictions = return_dict["text"]
+            tokens_batch = return_dict["tokens"]
+            logprobs_batch = return_dict["logprobs"]
+            trim_preds = post_process(predictions, args)
+            k = _get_index_conclusion(trim_preds)
+            exclude_conclusion_predictions = trim_preds[:k]
+
+            for i in range(len(exclude_conclusion_predictions)):
+                flare_score = cal_flare_score(
+                    exclude_conclusion_predictions[i],
+                    tokens_batch[i],
+                    logprobs_batch[i],
+                )
+                flare_scores.append(flare_score)
+
             save_generated_answers(
                 args.dataset_name,
                 args.model_name,
@@ -88,6 +145,10 @@ def main():
                 args.most_likely,
                 inference_type="test",
             )
+
+        with open(f"./save_for_test/{args.dataset_name}_flare_label.pkl", "wb") as f:
+            pickle.dump(flare_scores, f)
+
     elif args.generate_gt:
         model.eval()
         gts = np.zeros(0)
@@ -130,13 +191,15 @@ def main():
                 allow_pickle=True,
             ).astype(np.float32)
 
-        # Get the split and label (true or false) of the unlabeled data and the test data.
-        score_file = f"./save_for_test/ml_{args.dataset_name}_bleurt_score.npy"
-
-        scores = np.load(score_file)
+        scores = np.load(f"./save_for_test/ml_{args.dataset_name}_bleurt_score.npy")
         thres = args.thres_gt
         gt_label = np.asarray(scores > thres, dtype=np.int32)
         assert len(gt_label) == embed_generated.shape[0]
+
+        f = f"./save_for_test/{args.dataset_name}_flare_label.pkl"
+        with open(f, "rb") as file:  # Open the file in binary read mode
+            flare_scores = np.array(pickle.load(file))
+        assert len(flare_scores) == len(gt_label)
 
         logging.info(f"Num truthful samples: {np.sum(gt_label == 1)}")
         logging.info(f"Num hallucinated samples: {np.sum(gt_label == 0)}")
@@ -155,12 +218,18 @@ def main():
         pca_wild_score_binary_cls = pca_wild_score_binary_cls.cpu().data.numpy()
         if np.isnan(pca_wild_score_binary_cls).sum() > 0:
             breakpoint()
-        measures = get_measures(
+        halo_measures = get_measures(
             pca_wild_score_binary_cls[gt_label == 1],
             pca_wild_score_binary_cls[gt_label == 0],
             plot=False,
         )
-        print("test AUROC: ", measures[0])
+        flare_measures = get_measures(
+            flare_scores[gt_label == 1],
+            flare_scores[gt_label == 0],
+            plot=False,
+        )
+        print("Haloscope AUROC: ", halo_measures[0])
+        print("Flare AUROC: ", flare_measures[0])
 
 
 if __name__ == "__main__":
