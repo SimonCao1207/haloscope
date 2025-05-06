@@ -17,6 +17,7 @@ from hal_det_llama import (
     generate_embeddings,
     generate_prompts,
     get_correct_answers,
+    load_bleurt_model,
     load_generated_answers,
     post_process,
     save_generated_answers,
@@ -105,7 +106,7 @@ def main():
 
     model_name = HF_NAMES[args.model_name]
     generator = BasicGenerator(model_name)
-    model, tokenizer = generator.model, generator.tokenizer
+    bleurt_model, bleurt_tokenizer = load_bleurt_model()
     os.makedirs("./save_for_test", exist_ok=True)
     if args.gene:
         os.makedirs(f"./save_for_test/{args.dataset_name}_hal_det/", exist_ok=True)
@@ -119,7 +120,7 @@ def main():
             )
             return_dict = generator.generate(
                 prompts,
-                64,
+                max_length=64,
                 return_logprobs=True,
             )
             predictions = return_dict["text"]
@@ -150,7 +151,7 @@ def main():
             pickle.dump(flare_scores, f)
 
     elif args.generate_gt:
-        model.eval()
+        bleurt_model.eval()
         gts = np.zeros(0)
         for i in tqdm(range(len(dataset)), desc="Generating ground truth"):
             all_answers = get_correct_answers(dataset, i, args.dataset_name, None)
@@ -165,13 +166,15 @@ def main():
             if len(predictions) == 0:
                 continue
             all_results = compute_bleurt_scores(
-                args, model, tokenizer, predictions, all_answers
+                args, bleurt_model, bleurt_tokenizer, predictions, all_answers
             )
             gts = np.concatenate([gts, all_results], 0)
         file_path = f"./save_for_test/ml_{args.dataset_name}_bleurt_score.npy"
+        print("gts shape: ", gts.shape)
         np.save(file_path, gts)
     else:
         # Get the embeddings of the generated question and answers.
+        model, tokenizer = generator.model, generator.tokenizer
         if args.regenerate_embed:
             embed_generated = generate_embeddings(
                 args,

@@ -10,17 +10,15 @@ logger = logging.getLogger(__name__)
 
 
 class BasicGenerator:
-    def __init__(self, model):
-        logger.info(f"Loading model from {model}")
-        self.tokenizer = AutoTokenizer.from_pretrained(model, padding_side="left")
-        self.model_config = AutoConfig.from_pretrained(
-            model, trust_remote_code="falcon" in model
-        )
+    def __init__(self, model_name):
+        logger.info(f"Loading model from {model_name}")
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
+
+        self.model_config = AutoConfig.from_pretrained(model_name)
         self.model = AutoModelForCausalLM.from_pretrained(
-            model,
+            model_name,
             device_map="auto",
             torch_dtype=torch.bfloat16,
-            trust_remote_code="falcon" in model,
         )
         if self.model_config.model_type in ["llama", "phi3"] and "Llama-3" not in model:
             self.space_token = "▁"
