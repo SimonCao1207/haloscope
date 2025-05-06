@@ -10,10 +10,9 @@ from baukit import TraceDict
 from bleurt_pytorch import BleurtForSequenceClassification, BleurtTokenizer
 from sklearn.decomposition import PCA
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
-import llama_iti
 from data.wmqa import get_top_sentence
+from generator import BasicGenerator
 from linear_probe import get_linear_acc
 from metric_utils import get_measures, print_measures
 from prepare_data import load_dataset_by_name
@@ -234,86 +233,22 @@ def clean_decoded(decoded, dataset_name):
     return decoded
 
 
-def generate_answers(model, tokenizer, dataset_name, input_ids, num_gene, most_likely):
-    """Generate answers using the model."""
-    answers = []
-    if dataset_name == "2wikimultihopqa":
-        assert num_gene == 1, "Only one answer is generated for 2wikimultihopqa."
-        assert most_likely == 1, "Only most-likely generation is supported."
-        attention_mask = (input_ids != tokenizer.pad_token_id).long()
-        generation_args = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "max_new_tokens": 64,
-            "num_return_sequences": 1,
-            "return_dict_in_generate": True,
-            "num_beams": 5,
-            "do_sample": False,
-        }
-        outputs = model.generate(**generation_args)
-        input_length = input_ids.shape[-1]
-        generated_tokens = outputs.sequences[:, input_length:]
-        answers = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
-    else:
-        for _ in range(num_gene):
-            attention_mask = (input_ids != tokenizer.pad_token_id).long()
-            generation_args = {
-                "input_ids": input_ids,
-                "attention_mask": attention_mask,
-                "max_new_tokens": 64,
-                "num_return_sequences": 1,
-            }
-            if most_likely:
-                generation_args.update({"num_beams": 5, "do_sample": False})
-            else:
-                generation_args.update(
-                    {
-                        "do_sample": True,
-                        "num_beams": 1,
-                        "temperature": 0.5,
-                        "top_p": 1.0,
-                    }
-                )
-
-            generated = model.generate(**generation_args)
-            decoded = tokenizer.decode(
-                generated[0, input_ids.shape[-1] :], skip_special_tokens=True
-            )
-            decoded = clean_decoded(decoded, dataset_name)
-            answers.append(decoded)
-
-    return answers
+def generate_answers(generator, prompts, args):
+    """Generate answers using the generator."""
+    return_dict = generator.generate(
+        prompts,
+        max_length=64,
+        return_logprobs=False,
+    )
+    predictions = return_dict["text"]
+    predictions = [clean_decoded(pred, args.dataset_name) for pred in predictions]
+    return predictions
 
 
-def load_model(args):
-    if args.generate_gt:
-        model = BleurtForSequenceClassification.from_pretrained("./models/BLEURT-20")
-        model = model.cuda()
-        tokenizer = BleurtTokenizer.from_pretrained("./models/BLEURT-20")
-    elif args.local:
-        model_name = HF_NAMES[args.model_name] if not args.model_dir else args.model_dir
-        tokenizer = llama_iti.LlamaTokenizer.from_pretrained(
-            model_name, trust_remote_code=True
-        )
-        model = llama_iti.LlamaForCausalLM.from_pretrained(
-            model_name,
-            low_cpu_mem_usage=True,
-            torch_dtype=torch.float16,
-            device_map="auto",
-        )
-        model = model.cuda()
-    else:
-        model_name = HF_NAMES[args.model_name] if not args.model_dir else args.model_dir
-        tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            device_map="auto",
-            torch_dtype=torch.bfloat16,
-            trust_remote_code="falcon" in model_name,
-        )
-
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
+def load_bleurt_model():
+    model = BleurtForSequenceClassification.from_pretrained("./models/BLEURT-20")
+    model = model.cuda()
+    tokenizer = BleurtTokenizer.from_pretrained("./models/BLEURT-20")
     return model, tokenizer
 
 
@@ -622,9 +557,14 @@ def main():
     )
     args = parser.parse_args()
 
+    assert args.most_likely == 1, "Only greedy generation is supported."
+    assert args.num_gene == 1, "Only one answer is generated"
+
     seed_everything(args.seed)
     dataset, used_indices = load_dataset_by_name(args)
-    model, tokenizer = load_model(args)
+    model_name = HF_NAMES[args.model_name]
+    generator = BasicGenerator(model_name)
+    model, tokenizer = generator.model, generator.tokenizer
     length = len(used_indices) if used_indices is not None else len(dataset)
 
     if args.gene:
@@ -636,23 +576,13 @@ def main():
 
         for i in tqdm(range(0, length), desc="Generating answers"):
             prompts = generate_prompts(dataset, i, args.dataset_name, used_indices)
-            padding = True if args.dataset_name == "2wikimultihopqa" else False
-            input_ids = tokenizer(
-                prompts, return_tensors="pt", padding=padding
-            ).input_ids.cuda()
-            predictions = generate_answers(
-                model,
-                tokenizer,
-                args.dataset_name,
-                input_ids,
-                args.num_gene,
-                args.most_likely,
-            )
+            predictions = generate_answers(generator, prompts, args)
             save_generated_answers(
                 args.dataset_name, args.model_name, predictions, i, args.most_likely
             )
     elif args.generate_gt:
-        model.eval()
+        bleurt_model, bleurt_tokenizer = load_bleurt_model()
+        bleurt_model.eval()
         gts = np.zeros(0)
         for i in tqdm(range(length), desc="Generating ground truth"):
             all_answers = get_correct_answers(
@@ -672,7 +602,7 @@ def main():
                 all_results, _, _ = compute_rouge_scores(predictions, all_answers)
             else:
                 all_results = compute_bleurt_scores(
-                    args, model, tokenizer, predictions, all_answers
+                    args, bleurt_model, bleurt_tokenizer, predictions, all_answers
                 )
             if args.dataset_name == "2wikimultihopqa":
                 gts = np.concatenate([gts, all_results], 0)
