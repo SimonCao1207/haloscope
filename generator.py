@@ -20,7 +20,7 @@ class BasicGenerator:
             device_map="auto",
             torch_dtype=torch.bfloat16,
         )
-        if self.model_config.model_type in ["llama", "phi3"] and "Llama-3" not in model:
+        if self.model_config.model_type in ["llama", "phi3"] and "Llama-3" not in model_name:
             self.space_token = "▁"
         else:
             self.space_token = self.tokenizer.tokenize(" ")[0]
