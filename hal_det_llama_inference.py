@@ -118,8 +118,6 @@ def main():
         )
         flare_scores = []
         for i in tqdm(range(0, len(dataset)), desc="Generating answers"):
-            if i < 179:
-                continue
             prompts = generate_prompts(
                 dataset, i, args.dataset_name, None, add_fewshots=True
             )
