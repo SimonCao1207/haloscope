@@ -106,9 +106,10 @@ def main():
 
     model_name = HF_NAMES[args.model_name]
     generator = BasicGenerator(model_name)
+    base_dir = f"./save_for_test/{args.dataset_name}_hal_det/"
     os.makedirs("./save_for_test", exist_ok=True)
     if args.gene:
-        os.makedirs(f"./save_for_test/{args.dataset_name}_hal_det/", exist_ok=True)
+        os.makedirs(base_dir, exist_ok=True)
         os.makedirs(
             f"./save_for_test/{args.dataset_name}_hal_det/answers", exist_ok=True
         )
@@ -150,8 +151,10 @@ def main():
                 inference_type="test",
             )
 
-        with open(f"./save_for_test/{args.dataset_name}_flare_label.pkl", "wb") as f:
+        with open(f"{base_dir}/{args.dataset_name}_flare_score.pkl", "wb") as f:
             pickle.dump(flare_scores, f)
+
+        print("flare scores len: ", len(flare_scores))
 
     elif args.generate_gt:
         bleurt_model, bleurt_tokenizer = load_bleurt_model()
@@ -201,8 +204,8 @@ def main():
         gt_label = np.asarray(scores > thres, dtype=np.int32)
         assert len(gt_label) == embed_generated.shape[0]
 
-        f = f"./save_for_test/{args.dataset_name}_flare_label.pkl"
-        with open(f, "rb") as file:  # Open the file in binary read mode
+        f = f"{base_dir}/{args.dataset_name}_flare_score.pkl"
+        with open(f, "rb") as file:
             flare_scores = np.array(pickle.load(file))
         assert len(flare_scores) == len(gt_label)
 
