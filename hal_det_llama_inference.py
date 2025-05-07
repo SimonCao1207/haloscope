@@ -29,25 +29,26 @@ from metric_utils import get_measures
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
-def find_token_range_for_sentence(sentence, tokens, start_index):
+def find_token_range_for_sentence(sentence, tokens, start_index, vocab_dict):
     """Helper function to find which tokens belong to a sentence."""
     position = 0
     token_range = start_index
 
     while token_range < len(tokens):
         # Find the current token in the remaining part of the sentence
-        token_position = sentence[position:].find(tokens[token_range].strip())
-        if token_position == -1:
+        token = tokens[token_range].strip()
+        token_position = sentence[position:].find(token)
+        if token_position == -1 and token in vocab_dict.keys():
             break
 
         # Move past this token in the sentence
-        position += token_position + len(tokens[token_range].strip())
+        position += token_position + len(token)
         token_range += 1
 
     return token_range
 
 
-def cal_flare_score(text, tokens, logprobs):
+def cal_flare_score(text, tokens, logprobs, vocab_dict):
     """
     Return confidence score for text.
     """
@@ -62,7 +63,9 @@ def cal_flare_score(text, tokens, logprobs):
         return 1
 
     # Find which tokens belong to the current sentence
-    sentence_token_range = find_token_range_for_sentence(sentence, tokens, token_index)
+    sentence_token_range = find_token_range_for_sentence(
+        sentence, tokens, token_index, vocab_dict
+    )
     assert sentence_token_range != token_index
 
     # Calculate probabilities for all tokens in the sentence
@@ -115,6 +118,8 @@ def main():
         )
         flare_scores = []
         for i in tqdm(range(0, len(dataset)), desc="Generating answers"):
+            if i < 179:
+                continue
             prompts = generate_prompts(
                 dataset, i, args.dataset_name, None, add_fewshots=True
             )
@@ -139,6 +144,7 @@ def main():
                     exclude_conclusion_predictions[j],
                     tokens_batch[j],
                     logprobs_batch[j],
+                    vocab_dict=generator.tokenizer.get_vocab(),
                 )
                 flare_scores.append(flare_score)
 
