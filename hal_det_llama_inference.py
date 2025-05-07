@@ -106,7 +106,6 @@ def main():
 
     model_name = HF_NAMES[args.model_name]
     generator = BasicGenerator(model_name)
-    bleurt_model, bleurt_tokenizer = load_bleurt_model()
     os.makedirs("./save_for_test", exist_ok=True)
     if args.gene:
         os.makedirs(f"./save_for_test/{args.dataset_name}_hal_det/", exist_ok=True)
@@ -121,7 +120,11 @@ def main():
             return_dict = generator.generate(
                 prompts,
                 max_length=64,
+                beam_search=True,
+                output_scores=True,
                 return_logprobs=True,
+                return_entropies=False,
+                num_return_sequences=1,
             )
             predictions = return_dict["text"]
             tokens_batch = return_dict["tokens"]
@@ -151,6 +154,7 @@ def main():
             pickle.dump(flare_scores, f)
 
     elif args.generate_gt:
+        bleurt_model, bleurt_tokenizer = load_bleurt_model()
         bleurt_model.eval()
         gts = np.zeros(0)
         for i in tqdm(range(len(dataset)), desc="Generating ground truth"):
@@ -186,6 +190,7 @@ def main():
                 inference_type="test",
             )
         else:
+            logging.info("Loading embeddings from local")
             embed_generated = np.load(
                 f"save_for_test/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_layer_wise.npy",
                 allow_pickle=True,
@@ -204,13 +209,11 @@ def main():
         logging.info(f"Num truthful samples: {np.sum(gt_label == 1)}")
         logging.info(f"Num hallucinated samples: {np.sum(gt_label == 0)}")
 
-        logging.info("Inference the test set")
+        layer = 15
         checkpoint_dir = "./checkpoints"
-        checkpoint_path = os.path.join(checkpoint_dir, "clf_model.pth")
+        checkpoint_path = os.path.join(checkpoint_dir, f"clf_layer_{layer}.pth")
         clf = NonLinearClassifier(embed_generated.shape[2], num_classes=2).cuda()
         clf.load_state_dict(torch.load(checkpoint_path))
-
-        layer = 14
 
         clf.eval()
         output = clf(torch.from_numpy(embed_generated[:, layer, :]).cuda())

@@ -238,7 +238,10 @@ def generate_answers(generator, prompts, args):
     return_dict = generator.generate(
         prompts,
         max_length=64,
+        output_scores=False,
+        beam_search=True,
         return_logprobs=False,
+        return_entropies=False,
     )
     predictions = return_dict["text"]
     predictions = [clean_decoded(pred, args.dataset_name) for pred in predictions]
@@ -389,7 +392,7 @@ def _get_index_conclusion(predictions):
             or "Therefore" in predictions[i]
         ):
             return i
-    return -1
+    return len(predictions)
 
 
 def generate_embeddings(
@@ -825,7 +828,9 @@ def main():
         # Save the trained model to a checkpoint folder
         checkpoint_dir = "./checkpoints"
         os.makedirs(checkpoint_dir, exist_ok=True)
-        checkpoint_path = os.path.join(checkpoint_dir, "clf_model.pth")
+        checkpoint_path = os.path.join(
+            checkpoint_dir, f"clf_layer_{best_layer_over_thres}.pth"
+        )
         torch.save(clf.state_dict(), checkpoint_path)
         logging.info(f"Model saved to {checkpoint_path}")
 
