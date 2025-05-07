@@ -387,9 +387,9 @@ def _get_index_conclusion(predictions):
     """Get the index of the conclusion sentence in the predictions."""
     for i in range(len(predictions)):
         if (
-            "So the answer is" in predictions[i]
-            or "Thus" in predictions[i]
-            or "Therefore" in predictions[i]
+            "so the answer is" in predictions[i].lower()
+            or "thus" in predictions[i].lower()
+            or "therefore" in predictions[i].lower()
         ):
             return i
     return len(predictions)
@@ -829,7 +829,7 @@ def main():
         checkpoint_dir = "./checkpoints"
         os.makedirs(checkpoint_dir, exist_ok=True)
         checkpoint_path = os.path.join(
-            checkpoint_dir, f"clf_layer_{best_layer_over_thres}.pth"
+            checkpoint_dir, f"clf_layer_{best_layer_over_thres[argmax_index]}.pth"
         )
         torch.save(clf.state_dict(), checkpoint_path)
         logging.info(f"Model saved to {checkpoint_path}")
