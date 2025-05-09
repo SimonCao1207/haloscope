@@ -4,5 +4,6 @@ python hal_det_llama_inference.py \
     --dataset_name 2wikimultihopqa \
     --model_name llama3-1-8B-instruct \
     --most_likely 1 \
+    --regenerate_embed \
     --thres_gt 0.5 \
     --fewshots 6

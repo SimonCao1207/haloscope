@@ -33,6 +33,8 @@ class BasicGenerator:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
+        self.model.generation_config.pad_token_id = self.tokenizer.pad_token_id
+
     def generate(
         self,
         input_text,
