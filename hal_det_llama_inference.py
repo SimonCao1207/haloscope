@@ -29,25 +29,26 @@ from metric_utils import get_measures
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
-def find_token_range_for_sentence(sentence, tokens, start_index):
+def find_token_range_for_sentence(sentence, tokens, start_index, vocab_dict):
     """Helper function to find which tokens belong to a sentence."""
     position = 0
     token_range = start_index
 
     while token_range < len(tokens):
         # Find the current token in the remaining part of the sentence
-        token_position = sentence[position:].find(tokens[token_range].strip())
-        if token_position == -1:
+        token = tokens[token_range].strip()
+        token_position = sentence[position:].find(token)
+        if token_position == -1 and token in vocab_dict.keys():
             break
 
         # Move past this token in the sentence
-        position += token_position + len(tokens[token_range].strip())
+        position += token_position + len(token)
         token_range += 1
 
     return token_range
 
 
-def cal_flare_score(text, tokens, logprobs):
+def cal_flare_score(text, tokens, logprobs, vocab_dict):
     """
     Return confidence score for text.
     """
@@ -62,7 +63,9 @@ def cal_flare_score(text, tokens, logprobs):
         return 1
 
     # Find which tokens belong to the current sentence
-    sentence_token_range = find_token_range_for_sentence(sentence, tokens, token_index)
+    sentence_token_range = find_token_range_for_sentence(
+        sentence, tokens, token_index, vocab_dict
+    )
     assert sentence_token_range != token_index
 
     # Calculate probabilities for all tokens in the sentence
@@ -106,10 +109,10 @@ def main():
 
     model_name = HF_NAMES[args.model_name]
     generator = BasicGenerator(model_name)
-    bleurt_model, bleurt_tokenizer = load_bleurt_model()
+    base_dir = f"./save_for_test/{args.dataset_name}_hal_det/"
     os.makedirs("./save_for_test", exist_ok=True)
     if args.gene:
-        os.makedirs(f"./save_for_test/{args.dataset_name}_hal_det/", exist_ok=True)
+        os.makedirs(base_dir, exist_ok=True)
         os.makedirs(
             f"./save_for_test/{args.dataset_name}_hal_det/answers", exist_ok=True
         )
@@ -121,7 +124,11 @@ def main():
             return_dict = generator.generate(
                 prompts,
                 max_length=64,
+                beam_search=True,
+                output_scores=True,
                 return_logprobs=True,
+                return_entropies=False,
+                num_return_sequences=1,
             )
             predictions = return_dict["text"]
             tokens_batch = return_dict["tokens"]
@@ -135,6 +142,7 @@ def main():
                     exclude_conclusion_predictions[j],
                     tokens_batch[j],
                     logprobs_batch[j],
+                    vocab_dict=generator.tokenizer.get_vocab(),
                 )
                 flare_scores.append(flare_score)
 
@@ -147,10 +155,13 @@ def main():
                 inference_type="test",
             )
 
-        with open(f"./save_for_test/{args.dataset_name}_flare_label.pkl", "wb") as f:
+        with open(f"{base_dir}/{args.dataset_name}_flare_score.pkl", "wb") as f:
             pickle.dump(flare_scores, f)
 
+        print("flare scores len: ", len(flare_scores))
+
     elif args.generate_gt:
+        bleurt_model, bleurt_tokenizer = load_bleurt_model()
         bleurt_model.eval()
         gts = np.zeros(0)
         for i in tqdm(range(len(dataset)), desc="Generating ground truth"):
@@ -186,6 +197,7 @@ def main():
                 inference_type="test",
             )
         else:
+            logging.info("Loading embeddings from local")
             embed_generated = np.load(
                 f"save_for_test/{args.dataset_name}_hal_det/most_likely_{args.model_name}_gene_embeddings_layer_wise.npy",
                 allow_pickle=True,
@@ -196,21 +208,19 @@ def main():
         gt_label = np.asarray(scores > thres, dtype=np.int32)
         assert len(gt_label) == embed_generated.shape[0]
 
-        f = f"./save_for_test/{args.dataset_name}_flare_label.pkl"
-        with open(f, "rb") as file:  # Open the file in binary read mode
+        f = f"{base_dir}/{args.dataset_name}_flare_score.pkl"
+        with open(f, "rb") as file:
             flare_scores = np.array(pickle.load(file))
         assert len(flare_scores) == len(gt_label)
 
         logging.info(f"Num truthful samples: {np.sum(gt_label == 1)}")
         logging.info(f"Num hallucinated samples: {np.sum(gt_label == 0)}")
 
-        logging.info("Inference the test set")
+        layer = 15
         checkpoint_dir = "./checkpoints"
-        checkpoint_path = os.path.join(checkpoint_dir, "clf_model.pth")
+        checkpoint_path = os.path.join(checkpoint_dir, f"clf_layer_{layer}.pth")
         clf = NonLinearClassifier(embed_generated.shape[2], num_classes=2).cuda()
         clf.load_state_dict(torch.load(checkpoint_path))
-
-        layer = 14
 
         clf.eval()
         output = clf(torch.from_numpy(embed_generated[:, layer, :]).cuda())

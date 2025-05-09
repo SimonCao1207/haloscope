@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=6,7 \
+CUDA_VISIBLE_DEVICES=2,3 \
 python hal_det_llama.py \
     --dataset_name 2wikimultihopqa \
     --model_name llama3-1-8B-instruct \

@@ -20,7 +20,10 @@ class BasicGenerator:
             device_map="auto",
             torch_dtype=torch.bfloat16,
         )
-        if self.model_config.model_type in ["llama", "phi3"] and "Llama-3" not in model:
+        if (
+            self.model_config.model_type in ["llama", "phi3"]
+            and "Llama-3" not in model_name
+        ):
             self.space_token = "▁"
         else:
             self.space_token = self.tokenizer.tokenize(" ")[0]
@@ -30,6 +33,8 @@ class BasicGenerator:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
+        self.model.generation_config.pad_token_id = self.tokenizer.pad_token_id
+
     def generate(
         self,
         input_text,
@@ -37,28 +42,47 @@ class BasicGenerator:
         return_logprobs=True,
         num_return_sequences=1,
         return_entropies=True,
+        output_scores=True,
+        beam_search=False,
         temperature=1.0,
     ):
         input = self.tokenizer(input_text, return_tensors="pt", padding=True)
         input = input.to(self.model.device)
         return_dict = dict()
 
-        outputs = self.model.generate(
-            input_ids=input["input_ids"],
-            attention_mask=input["attention_mask"],
-            max_new_tokens=max_length,
-            num_return_sequences=num_return_sequences,
-            return_dict_in_generate=True,
-            output_scores=True,
-            temperature=temperature,
-        )
+        input_ids = input["input_ids"]
+        attention_mask = input["attention_mask"]
+
+        generation_args = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "max_new_tokens": max_length,
+            "num_return_sequences": num_return_sequences,
+            "return_dict_in_generate": True,
+            "output_scores": output_scores,
+            # "temperature": temperature,
+        }
+        if beam_search:
+            generation_args["do_sample"] = False
+            generation_args["num_beams"] = 5
+
+        outputs = self.model.generate(**generation_args)
         input_length = input["input_ids"].shape[-1]
         generated_tokens = outputs.sequences[:, input_length:]
         texts = self.tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
         # generate output_scores shape: tuple of tensor -> (max_length, batch_size, vocab_size)
         if return_logprobs:
+            """
+            the `beam_indices` tensor is necessary to correctly align the log-probability scores 
+            with the actual tokens generated in the final sequence 
+            when num_return_sequences < num_beams.
+            """
+            beam_indices = outputs.beam_indices if beam_search else None
             transition_scores = self.model.compute_transition_scores(
-                outputs.sequences, outputs.scores, normalize_logits=True
+                outputs.sequences,
+                outputs.scores,
+                beam_indices=beam_indices,
+                normalize_logits=True,
             )
             if num_return_sequences == 1:
                 # text = self.tokenizer.decode(generated_tokens[0]) # text = "".join(tokens)

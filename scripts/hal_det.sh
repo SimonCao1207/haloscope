@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=6 \
+CUDA_VISIBLE_DEVICES=2,3 \
 python hal_det_llama.py \
     --seed 41 \
     --dataset_name 2wikimultihopqa \
