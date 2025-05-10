@@ -49,7 +49,7 @@ def load_dataset_by_name(args):
         dataset = load_coqa_dataset(model)
         return dataset, None
     elif args.dataset_name == "2wikimultihopqa":
-        path = "./data/2WMQA_cot_train.jsonl"
+        path = "./data/2WMQA_train.jsonl"
         data = WikiMultiHopQA(path)
         data.format(fewshot=args.fewshots)
         dataset = data.dataset
@@ -160,6 +160,6 @@ if __name__ == "__main__":
     length = len(dataset) if used_indices is None else len(used_indices)
     print(f"Dataset loaded with {length} samples.")
     if args.dataset_name == "2wikimultihopqa":
-        print(f"Sample all_answers {dataset[0]['all_answers']}")
+        print(f"Sample all_answers {dataset[0]['cot']}")
     else:
         print(f"Sample data {dataset[0]}")

@@ -29,7 +29,7 @@ for i in tqdm(range(length), desc="Logging predictions"):
     prediction = list(np.load(file_path))
     for j in range(len(prediction)):
         prediction[j] = get_top_sentence(str(prediction[j]))
-    answer = dataset[i]["all_answers"]
+    answer = dataset[i]["cot"]
     k = _get_index_conclusion(prediction)
     num_samples = k if k > 0 else len(prediction[:k])
 

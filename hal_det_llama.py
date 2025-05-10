@@ -144,17 +144,8 @@ def svd_embed_score(
                 best_mean = mean_recorded
                 best_sign = sign_layer
 
-        print(
-            "k: ",
-            k,
-            "best result: ",
-            best_result,
-            "layer: ",
-            best_layer,
-            "mean: ",
-            mean,
-            "svd: ",
-            svd,
+        logging.info(
+            f"k: {k} | Best Result: {best_result} | Layer: {best_layer} | Mean: {mean} | SVD: {svd}"
         )
 
         if best_auroc > best_auroc_over_k:
@@ -205,12 +196,12 @@ def generate_prompts(
     elif dataset_name == "coqa":
         prompts = dataset[i]["prompt"]
     elif dataset_name == "2wikimultihopqa":
-        all_answers = dataset[i]["all_answers"]
+        cot = dataset[i]["cot"]
         prompts = []
         prefix = _generate_prompt(dataset, i, add_fewshots=add_fewshots)
         prompts.append(prefix)
-        for j in range(1, len(all_answers)):
-            prompts.append(f"{prefix} {' '.join(all_answers[:j])}")
+        for j in range(1, len(cot)):
+            prompts.append(f"{prefix} {' '.join(cot[:j])}")
     else:
         question = dataset[i]["question"]
         prompts = f"Answer the question concisely. Q: {question} A:"
@@ -327,7 +318,7 @@ def get_correct_answers(dataset, i, dataset_name, used_indices=None):
     elif dataset_name == "tydiqa":
         all_answers = dataset[int(used_indices[i])]["answers"]["text"]
     elif dataset_name == "2wikimultihopqa":
-        all_answers = dataset[i]["all_answers"]
+        all_answers = dataset[i]["cot"]
     return all_answers
 
 
@@ -533,6 +524,74 @@ def load_embeddings(args):
     return embed_generated
 
 
+def train_classifier_for_threshold_and_layer(
+    embed_generated, best_scores, thres_wild, layer
+):
+    """
+    Given embeddings, scores, a threshold, and a layer, split the data and train a classifier.
+    Returns: clf
+    """
+    thres_wild_score = np.sort(best_scores)[int(len(best_scores) * thres_wild)]
+    true_wild = embed_generated[:, layer, :][best_scores > thres_wild_score]
+    false_wild = embed_generated[:, layer, :][best_scores <= thres_wild_score]
+    embed_train = np.concatenate([true_wild, false_wild], 0)
+    label_train = np.concatenate(
+        [np.ones(len(true_wild)), np.zeros(len(false_wild))], 0
+    )
+    (
+        best_acc,
+        final_acc,
+        (clf, best_state, best_preds, preds, labels_val),
+        losses_train,
+    ) = get_linear_acc(
+        embed_train,
+        label_train,
+        embed_train,
+        label_train,
+        2,
+        epochs=50,
+        batch_size=512,
+        cosine=True,
+        nonlinear=True,
+        learning_rate=0.05,
+        weight_decay=0.0003,
+    )
+    return clf
+
+
+def eval_clf(clf, embed_generated, layer, gt_label):
+    """
+    Evaluate the classifier and return the AUROC and result info.
+    """
+    clf.eval()
+    output = clf(torch.from_numpy(embed_generated[:, layer, :]).cuda())
+    pca_wild_score_binary_cls = torch.sigmoid(output)
+    pca_wild_score_binary_cls = pca_wild_score_binary_cls.cpu().data.numpy()
+
+    if np.isnan(pca_wild_score_binary_cls).sum() > 0:
+        breakpoint()
+    measures = get_measures(
+        pca_wild_score_binary_cls[gt_label == 1],
+        pca_wild_score_binary_cls[gt_label == 0],
+        plot=False,
+    )
+    return measures
+
+
+def save_trained_classifier(clf, best_layer, seed, checkpoint_dir="./checkpoints"):
+    """
+    Save the trained classifier to a checkpoint folder and log the path.
+    """
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    checkpoint_path = os.path.join(
+        checkpoint_dir,
+        f"clf_layer_{best_layer}_seed_{seed}.pth",
+    )
+    torch.save(clf.state_dict(), checkpoint_path)
+    logging.info(f"Model saved to {checkpoint_path}")
+    return checkpoint_path
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=41)
@@ -618,7 +677,6 @@ def main():
             embed_generated = generate_embeddings(
                 args, dataset, used_indices, length, model, tokenizer
             )
-
         else:
             embed_generated = load_embeddings(args)
 
@@ -627,9 +685,9 @@ def main():
         prefix = "ml" if args.most_likely else "bg"
         score_file = f"./{prefix}_{args.dataset_name}_{score_type}_score.npy"
 
-        scores = np.load(score_file)
+        bleurt_scores = np.load(score_file)
         thres = args.thres_gt
-        gt_label = np.asarray(scores > thres, dtype=np.int32)
+        gt_label = np.asarray(bleurt_scores > thres, dtype=np.int32)
         assert len(gt_label) == embed_generated.shape[0]
 
         (
@@ -658,8 +716,16 @@ def main():
             )
         )
 
-        # returned_results = svd_embed_score(embed_generated_wild, gt_label_wild,
-        #                                    1, 11, mean=0, svd=0, weight=args.weighted_svd)
+        # returned_results = svd_embed_score(
+        #     embed_generated_wild,
+        #     gt_label_wild,
+        #     1,
+        #     11,
+        #     mean=0,
+        #     svd=0,
+        #     weight=args.weighted_svd,
+        # )
+        # breakpoint()
 
         logging.info("Get the best hyper-parameters (k, layer) on validation set")
         returned_results = svd_embed_score(
@@ -683,13 +749,15 @@ def main():
         projection = pca_model.components_.T
         if args.weighted_svd:
             projection = pca_model.singular_values_ * projection
-        scores = np.mean(
+        train_scores = np.mean(
             np.matmul(embed_generated_wild[:, best_layer_on_val, :], projection),
             -1,
             keepdims=True,
         )
-        assert scores.shape[1] == 1
-        best_scores = np.sqrt(np.sum(np.square(scores), axis=1)) * best_sign_on_val
+        assert train_scores.shape[1] == 1
+        best_train_scores = (
+            np.sqrt(np.sum(np.square(train_scores), axis=1)) * best_sign_on_val
+        )
 
         # Direct projection
         test_scores = np.mean(
@@ -715,56 +783,11 @@ def main():
         for thres_wild in thresholds:
             best_auroc = 0
             for layer in range(len(embed_generated_wild[0])):
-                thres_wild_score = np.sort(best_scores)[
-                    int(len(best_scores) * thres_wild)
-                ]
-                true_wild = embed_generated_wild[:, layer, :][
-                    best_scores > thres_wild_score
-                ]
-                false_wild = embed_generated_wild[:, layer, :][
-                    best_scores <= thres_wild_score
-                ]
-
-                embed_train = np.concatenate([true_wild, false_wild], 0)
-                label_train = np.concatenate(
-                    [np.ones(len(true_wild)), np.zeros(len(false_wild))], 0
+                clf = train_classifier_for_threshold_and_layer(
+                    embed_generated_wild, best_train_scores, thres_wild, layer
                 )
 
-                ## gt training, saplma
-                # embed_train = embed_generated_wild[:,layer,:]
-                # label_train = gt_label_wild
-                ## gt training, saplma
-                (
-                    best_acc,
-                    final_acc,
-                    (clf, best_state, best_preds, preds, labels_val),
-                    losses_train,
-                ) = get_linear_acc(
-                    embed_train,
-                    label_train,
-                    embed_train,
-                    label_train,
-                    2,
-                    epochs=50,
-                    batch_size=512,
-                    cosine=True,
-                    nonlinear=True,
-                    learning_rate=0.05,
-                    weight_decay=0.0003,
-                )
-
-                clf.eval()
-                output = clf(torch.from_numpy(embed_generated_eval[:, layer, :]).cuda())
-                pca_wild_score_binary_cls = torch.sigmoid(output)
-                pca_wild_score_binary_cls = pca_wild_score_binary_cls.cpu().data.numpy()
-
-                if np.isnan(pca_wild_score_binary_cls).sum() > 0:
-                    breakpoint()
-                measures = get_measures(
-                    pca_wild_score_binary_cls[gt_label_val == 1],
-                    pca_wild_score_binary_cls[gt_label_val == 0],
-                    plot=False,
-                )
+                measures = eval_clf(clf, embed_generated_eval, layer, gt_label_val)
 
                 if measures[0] > best_auroc:
                     best_auroc = measures[0]
@@ -773,13 +796,8 @@ def main():
 
             auroc_over_thres.append(best_auroc)
             best_layer_over_thres.append(best_layer_on_val)
-            print(
-                "thres: ",
-                thres_wild,
-                "best result: ",
-                best_result,
-                "best_layer: ",
-                best_layer_on_val,
+            logging.info(
+                f"Threshold: {thres_wild:.3f} | Best AUROC: {best_result[0]:.2f} | Best Layer: {best_layer_on_val}"
             )
         argmax_index = max(
             range(len(auroc_over_thres)), key=auroc_over_thres.__getitem__
@@ -790,66 +808,23 @@ def main():
             best_layer_over_thres[argmax_index],
         )
 
-        thres_wild_score = np.sort(best_scores)[
-            int(len(best_scores) * thresholds[argmax_index])
-        ]
-        true_wild = embed_generated_wild[:, best_layer_over_thres[argmax_index], :][
-            best_scores > thres_wild_score
-        ]
-        false_wild = embed_generated_wild[:, best_layer_over_thres[argmax_index], :][
-            best_scores <= thres_wild_score
-        ]
-
-        embed_train = np.concatenate([true_wild, false_wild], 0)
-        label_train = np.concatenate(
-            [np.ones(len(true_wild)), np.zeros(len(false_wild))], 0
-        )
-
-        (
-            best_acc,
-            final_acc,
-            (clf, best_state, best_preds, preds, labels_val),
-            losses_train,
-        ) = get_linear_acc(
-            embed_train,
-            label_train,
-            embed_train,
-            label_train,
-            2,
-            epochs=50,
-            print_ret=True,
-            batch_size=512,
-            cosine=True,
-            nonlinear=True,
-            learning_rate=0.05,
-            weight_decay=0.0003,
+        clf = train_classifier_for_threshold_and_layer(
+            embed_generated_wild,
+            best_train_scores,
+            thresholds[argmax_index],
+            best_layer_over_thres[argmax_index],
         )
 
         # Save the trained model to a checkpoint folder
-        checkpoint_dir = "./checkpoints"
-        os.makedirs(checkpoint_dir, exist_ok=True)
-        checkpoint_path = os.path.join(
-            checkpoint_dir, f"clf_layer_{best_layer_over_thres[argmax_index]}.pth"
-        )
-        torch.save(clf.state_dict(), checkpoint_path)
-        logging.info(f"Model saved to {checkpoint_path}")
+        save_trained_classifier(clf, best_layer_over_thres[argmax_index], args.seed)
 
-        clf.eval()
-        output = clf(
-            torch.from_numpy(
-                embed_generated_test[:, best_layer_over_thres[argmax_index], :]
-            ).cuda()
+        test_measures = eval_clf(
+            clf,
+            embed_generated_test,
+            best_layer_over_thres[argmax_index],
+            gt_label_test,
         )
-        pca_wild_score_binary_cls = torch.sigmoid(output)
-        pca_wild_score_binary_cls = pca_wild_score_binary_cls.cpu().data.numpy()
-        if np.isnan(pca_wild_score_binary_cls).sum() > 0:
-            breakpoint()
-        measures = get_measures(
-            pca_wild_score_binary_cls[gt_label_test == 1],
-            pca_wild_score_binary_cls[gt_label_test == 0],
-            plot=False,
-        )
-        print("test AUROC: ", measures[0])
+        print("test AUROC: ", test_measures[0])
 
 
 if __name__ == "__main__":

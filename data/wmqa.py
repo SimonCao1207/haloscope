@@ -69,13 +69,18 @@ class WikiMultiHopQA(BaseDataset):
         with open(os.path.join(data_path), "r") as fin:
             for line in tqdm(fin):
                 example = json.loads(line)
-                question = replace_strange_character(example["question"])
-                answer = replace_strange_character(example["answer"])
-                all_answers = split_sentences(answer)
+                question = example["question"]
+                cot = example["chain_of_thought"]
+                evidences = example["evidences"]
+                unsure_statements = example["missing_knowledge_statements"]
+                intermediate_questions = example["intermediate_questions"]
                 dataset.append(
                     {
                         "question": question,
-                        "all_answers": all_answers,
+                        "cot": cot,
+                        "evdidences": evidences,
+                        "unsure_statements": unsure_statements,
+                        "intermediate_questions": intermediate_questions,
                     }
                 )
         self.dataset = Dataset.from_list(dataset)
@@ -85,16 +90,6 @@ class WikiMultiHopQA(BaseDataset):
 
     def __getitem__(self, index):
         return self.dataset[index]
-
-
-def replace_strange_character(text):
-    char_map = {
-        "Æ": "Ae",
-        # Add more ligatures here if needed
-    }
-    for char, replacement in char_map.items():
-        text = text.replace(char, replacement)
-    return text
 
 
 def split_sentences(text):

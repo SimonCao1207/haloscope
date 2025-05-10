@@ -37,3 +37,6 @@ save_for_eval/
 .vscode/
 *.npy
 coqa_dataset/
+save_for_test/
+log/
+*.jpg
