@@ -70,19 +70,28 @@ class WikiMultiHopQA(BaseDataset):
             for line in tqdm(fin):
                 example = json.loads(line)
                 question = example["question"]
-                cot = example["chain_of_thought"]
-                evidences = example["evidences"]
-                unsure_statements = example["missing_knowledge_statements"]
-                intermediate_questions = example["intermediate_questions"]
-                dataset.append(
-                    {
-                        "question": question,
-                        "cot": cot,
-                        "evdidences": evidences,
-                        "unsure_statements": unsure_statements,
-                        "intermediate_questions": intermediate_questions,
-                    }
-                )
+                if data_path.endswith("train.jsonl"):
+                    cot = example["chain_of_thought"]
+                    evidences = example["evidences"]
+                    unsure_statements = example["missing_knowledge_statements"]
+                    intermediate_questions = example["intermediate_questions"]
+                    dataset.append(
+                        {
+                            "question": question,
+                            "cot": cot,
+                            "evdidences": evidences,
+                            "unsure_statements": unsure_statements,
+                            "intermediate_questions": intermediate_questions,
+                        }
+                    )
+                else:
+                    answer = example["answer"]
+                    dataset.append(
+                        {
+                            "question": question,
+                            "cot": split_sentences(answer),
+                        }
+                    )
         self.dataset = Dataset.from_list(dataset)
 
     def __len__(self):
