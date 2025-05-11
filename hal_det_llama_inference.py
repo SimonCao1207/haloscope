@@ -220,7 +220,7 @@ def main():
         layer = 25
         checkpoint_dir = "./checkpoints"
         checkpoint_path = os.path.join(
-            checkpoint_dir, f"clf_layer_{layer}_{args.seed}.pth"
+            checkpoint_dir, f"clf_layer_{layer}_seed{args.seed}.pth"
         )
         clf = NonLinearClassifier(embed_generated.shape[2], num_classes=2).cuda()
         clf.load_state_dict(torch.load(checkpoint_path))
