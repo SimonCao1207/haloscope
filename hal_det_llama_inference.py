@@ -14,6 +14,7 @@ from hal_det_llama import (
     HF_NAMES,
     _get_index_conclusion,
     compute_bleurt_scores,
+    eval_clf,
     generate_embeddings,
     generate_prompts,
     get_correct_answers,
@@ -216,27 +217,20 @@ def main():
         logging.info(f"Num truthful samples: {np.sum(gt_label == 1)}")
         logging.info(f"Num hallucinated samples: {np.sum(gt_label == 0)}")
 
-        layer = 15
+        layer = 25
         checkpoint_dir = "./checkpoints"
-        checkpoint_path = os.path.join(checkpoint_dir, f"clf_layer_{layer}.pth")
+        checkpoint_path = os.path.join(
+            checkpoint_dir, f"clf_layer_{layer}_{args.seed}.pth"
+        )
         clf = NonLinearClassifier(embed_generated.shape[2], num_classes=2).cuda()
         clf.load_state_dict(torch.load(checkpoint_path))
 
-        clf.eval()
-        output = clf(torch.from_numpy(embed_generated[:, layer, :]).cuda())
-        pca_wild_score_binary_cls = torch.sigmoid(output)
-        pca_wild_score_binary_cls = pca_wild_score_binary_cls.cpu().data.numpy()
-        if np.isnan(pca_wild_score_binary_cls).sum() > 0:
-            breakpoint()
-        halo_measures = get_measures(
-            pca_wild_score_binary_cls[gt_label == 1],
-            pca_wild_score_binary_cls[gt_label == 0],
-            plot=True,
-        )
+        halo_measures = eval_clf(clf, embed_generated, layer, gt_label)
+
         flare_measures = get_measures(
             flare_scores[gt_label == 1],
             flare_scores[gt_label == 0],
-            plot=True,
+            plot=False,
         )
         print("Haloscope AUROC: ", halo_measures[0])
         print("Flare AUROC: ", flare_measures[0])
